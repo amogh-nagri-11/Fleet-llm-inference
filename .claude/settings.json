@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./venv/bin/python:*)",
+      "Bash(./venv/bin/uvicorn:*)",
+      "Bash(./venv/bin/pip:*)",
+      "Bash(python scripts/benchmark.py:*)",
+      "Bash(./venv/bin/python scripts/benchmark.py:*)",
+      "Bash(redis-cli:*)",
+      "Bash(curl -s http://localhost:*)",
+      "Bash(curl -s -X POST http://localhost:*)",
+      "Bash(curl -s -o /dev/null*)",
+      "Bash(ollama list)",
+      "Bash(ollama ps)",
+      "Bash(pgrep:*)",
+      "Bash(pkill -f uvicorn*)",
+      "Bash(ls:*)",
+      "Bash(cat:*)",
+      "Bash(tail:*)",
+      "Bash(grep:*)",
+      "Bash(docker compose config*)"
+    ],
+    "deny": []
+  }
+}

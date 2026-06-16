@@ -67,7 +67,7 @@ async def generate(req: GenerateRequest, x_api_key: Optional[str] = Header(None)
 async def chat(req: ChatRequest, x_api_key: Optional[str] = Header(None)):
     verify_api_key(x_api_key)
 
-    model = req.model or settings.default_model
+    model = req.model or settings.DEFAULT_MODEL
     worker = load_balancer.pick_worker()
 
     try:

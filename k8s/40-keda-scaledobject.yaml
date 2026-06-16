@@ -1,0 +1,59 @@
+# KEDA-driven autoscaling on Redis queue depth.
+#
+# Requires KEDA installed in the cluster:
+#   helm repo add kedacore https://kedacore.github.io/charts
+#   helm install keda kedacore/keda --namespace keda --create-namespace
+#
+# The `redis` scaler uses LLEN on the list key. listLength is the AVERAGE queue
+# depth each replica should handle: desiredReplicas = ceil(LLEN / listLength).
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: ollama-queue-scaler
+  namespace: llm-engine
+spec:
+  scaleTargetRef:
+    name: ollama                 # scales the Ollama worker Deployment
+  minReplicaCount: 1
+  maxReplicaCount: 6
+  pollingInterval: 15            # seconds between queue checks
+  cooldownPeriod: 60             # seconds to wait before scaling back down
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: 120
+  triggers:
+    - type: redis
+      metadata:
+        address: redis.llm-engine.svc.cluster.local:6379
+        listName: "llm:request_queue"
+        listLength: "3"          # target ~3 queued jobs per Ollama pod
+        databaseIndex: "0"
+        enableTLS: "false"
+---
+# The queue *consumer* lives in the gateway (WorkerPool.blpop loop), so to raise
+# end-to-end queue throughput you must also scale the gateway. This second
+# ScaledObject keeps the two tiers in step. Remove it if you prefer a fixed
+# gateway replica count.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: gateway-queue-scaler
+  namespace: llm-engine
+spec:
+  scaleTargetRef:
+    name: gateway
+  minReplicaCount: 2
+  maxReplicaCount: 6
+  pollingInterval: 15
+  cooldownPeriod: 60
+  triggers:
+    - type: redis
+      metadata:
+        address: redis.llm-engine.svc.cluster.local:6379
+        listName: "llm:request_queue"
+        listLength: "3"
+        databaseIndex: "0"
+        enableTLS: "false"

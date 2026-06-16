@@ -4,6 +4,9 @@ global:
 
 scrape_configs:
   - job_name: "llm-gateway"
-    static_configs:
-      - targets: ["host.docker.internal:8000"]  # gateway running on host
     metrics_path: "/metrics"
+    static_configs:
+      # gateway as a compose service:
+      - targets: ["gateway:8000"]
+      # gateway running on the host (dev: `uvicorn` outside docker):
+      - targets: ["host.docker.internal:8000"]
