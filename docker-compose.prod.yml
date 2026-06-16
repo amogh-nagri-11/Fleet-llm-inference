@@ -1,0 +1,121 @@
+# Single-machine production deployment.
+#
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# Differences from the dev docker-compose.yml:
+#   - gateway runs the baked image (no --reload, no source bind-mounts)
+#   - restart policies on every service
+#   - Redis AOF persistence for the queue
+#   - Grafana dashboards auto-provisioned from observability/
+#
+# GPU: the worker blocks use the nvidia runtime. Remove the `deploy.resources`
+# device reservation if running on a CPU-only host.
+
+services:
+
+  gateway:
+    build:
+      context: .
+      dockerfile: gateway/Dockerfile
+    image: llm-gateway:prod
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file: .env
+    environment:
+      - WORKER_URLS=http://worker1:11434,http://worker2:11434
+      - REDIS_HOST=redis
+      - ROUTING_STRATEGY=least_latency
+      # Docker is not reachable from inside the container, so disable in-app
+      # container scaling; scale workers by editing replicas / compose scale.
+      - STANDBY_WORKER_URLS=
+    depends_on:
+      redis:
+        condition: service_healthy
+      worker1:
+        condition: service_started
+      worker2:
+        condition: service_started
+    networks:
+      - inference-net
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    networks:
+      - inference-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  worker1:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    volumes:
+      - ollama_worker1:/root/.ollama
+    networks:
+      - inference-net
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  worker2:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    volumes:
+      - ollama_worker2:/root/.ollama
+    networks:
+      - inference-net
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  prometheus:
+    image: prom/prometheus:latest
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    networks:
+      - inference-net
+
+  grafana:
+    image: grafana/grafana:latest
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    networks:
+      - inference-net
+
+volumes:
+  ollama_worker1:
+  ollama_worker2:
+  redis_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  inference-net:
+    driver: bridge

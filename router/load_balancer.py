@@ -37,6 +37,25 @@ class LoadBalancer:
 
         return available[0]
 
+    def has_worker(self, url: str) -> bool:
+        return any(w.stats.url == url for w in self.workers)
+
+    def add_worker(self, url: str) -> bool:
+        """Register a worker at runtime (used by the autoscaler fallback).
+        Idempotent — returns False if the worker is already registered."""
+        if self.has_worker(url):
+            return False
+        self.workers.append(OllamaClient(url))
+        self.breakers[url] = CircuitBreaker(url)
+        return True
+
+    def remove_worker(self, url: str) -> bool:
+        """Deregister a worker at runtime. Returns False if it wasn't present."""
+        before = len(self.workers)
+        self.workers = [w for w in self.workers if w.stats.url != url]
+        self.breakers.pop(url, None)
+        return len(self.workers) < before
+
     def record_success(self, worker_url: str):
         self.breakers[worker_url].record_success()
 

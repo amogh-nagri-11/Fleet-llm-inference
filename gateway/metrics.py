@@ -19,6 +19,16 @@ ACTIVE_REQUESTS = Gauge(
     "Number of requests currently being processed"
 )
 
+QUEUE_DEPTH = Gauge(
+    "llm_queue_depth",
+    "Pending jobs in the Redis request queue"
+)
+
+WORKER_COUNT = Gauge(
+    "llm_worker_count",
+    "Number of workers currently registered with the load balancer"
+)
+
 # ── Worker-level metrics ──────────────────────────────────
 WORKER_ACTIVE_REQUESTS = Gauge(
     "llm_worker_active_requests",
