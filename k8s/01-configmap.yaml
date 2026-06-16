@@ -1,0 +1,31 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gateway-config
+  namespace: llm-engine
+data:
+  # In-cluster the Ollama pods sit behind the `ollama` Service, so the gateway
+  # talks to one stable DNS name and Kubernetes load-balances across the pods.
+  WORKER_URLS: "http://ollama:11434"
+  REDIS_HOST: "redis"
+  REDIS_PORT: "6379"
+  REDIS_DB: "0"
+  DEFAULT_MODEL: "llama3:latest"
+  MAX_TOKENS: "2048"
+  REQUEST_TIMEOUT: "120"
+  ROUTING_STRATEGY: "least_latency"
+  CIRCUIT_BREAKER_THRESHOLD: "5"
+  CIRCUIT_BREAKER_TIMEOUT: "30"
+  # The in-app autoscaler is disabled in Kubernetes — KEDA owns scaling here.
+  # (Leave STANDBY_WORKER_URLS empty so the app-level autoscaler is a no-op.)
+  STANDBY_WORKER_URLS: ""
+  AUTOSCALE_MAX_WORKERS: "1"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: gateway-secrets
+  namespace: llm-engine
+type: Opaque
+stringData:
+  API_KEY: "change-me-in-production"

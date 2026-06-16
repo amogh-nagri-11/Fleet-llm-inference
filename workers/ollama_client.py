@@ -64,7 +64,6 @@ class OllamaClient:
                 return self.stats.is_healthy
         except Exception:
             self.stats.is_healthy = False
-            WORKER_ACTIVE_REQUESTS.labels(worker_url=self.base_url).dec()
             return False
 
     async def generate(self, model: str, prompt: str, stream: bool = False) -> dict:

@@ -3,8 +3,10 @@ services:
   # ── API Gateway ──────────────────────────────────────
   gateway:
     build:
-      context: ./gateway
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: gateway/Dockerfile
+    # Dev override: hot-reload. (Prod image runs without --reload — see compose.prod.)
+    command: uvicorn gateway.main:app --host 0.0.0.0 --port 8000 --reload
     ports:
       - "8000:8000"
     env_file: .env
@@ -16,7 +18,10 @@ services:
       - worker1
       - worker2
     volumes:
-      - ./gateway:/app
+      - ./config:/app/config
+      - ./router:/app/router
+      - ./workers:/app/workers
+      - ./gateway:/app/gateway
     networks:
       - inference-net
 
