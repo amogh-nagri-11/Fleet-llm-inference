@@ -1,9 +1,12 @@
-# LLM Inference Engine
+# Fleet — Distributed LLM Inference Engine
 
 A distributed inference engine that sits between your application and LLM models —
 managing load balancing, queuing, circuit breaking, autoscaling, and
 observability at production scale. Workers are [Ollama](https://ollama.com)
 instances; the gateway is FastAPI.
+
+Built because a single Ollama instance bottlenecks under concurrent load, drops
+requests, and has no fault recovery.
 
 ## Architecture
 
@@ -102,8 +105,43 @@ docker compose -f docker-compose.prod.yml up -d --build   # single-machine prod
 
 ### Kubernetes + KEDA
 
-See [`k8s/README.md`](k8s/README.md) and [`docs/deployment.md`](docs/deployment.md)
-(includes RunPod / Railway / Fly.io notes).
+`k8s/` holds the full manifest set, applied in name order:
+
+| File | Resource |
+|---|---|
+| `00-namespace.yaml` | `llm-engine` namespace |
+| `01-configmap.yaml` | gateway config + API key secret |
+| `10-redis.yaml` | Redis Deployment + Service (the queue) |
+| `20-ollama.yaml` | Ollama worker Deployment + Service (scaled by KEDA) |
+| `30-gateway.yaml` | Gateway Deployment + Service |
+| `40-keda-scaledobject.yaml` | KEDA ScaledObjects (Ollama + gateway) |
+
+```bash
+# 1. install KEDA
+helm repo add kedacore https://kedacore.github.io/charts
+helm install keda kedacore/keda --namespace keda --create-namespace
+
+# 2. build + push the gateway image FROM THE REPO ROOT
+docker build -f gateway/Dockerfile -t ghcr.io/<you>/llm-gateway:latest .
+docker push ghcr.io/<you>/llm-gateway:latest
+# then replace REPLACE_ME in k8s/30-gateway.yaml with that image
+
+# 3. deploy
+kubectl apply -f k8s/00-namespace.yaml
+kubectl apply -f k8s/
+kubectl -n llm-engine get pods -w
+
+# 4. set a real API key
+kubectl -n llm-engine create secret generic gateway-secrets \
+  --from-literal=API_KEY="$(openssl rand -hex 16)" \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+# 5. test
+kubectl -n llm-engine port-forward svc/gateway 8000:80
+```
+
+Full walkthrough in [`k8s/README.md`](k8s/README.md); cloud paths (RunPod GPU
+workers, Railway / Fly.io gateway) in [`docs/deployment.md`](docs/deployment.md).
 
 ## Endpoints
 
@@ -132,8 +170,22 @@ scales workers when `depth >= AUTOSCALE_UP_THRESHOLD`:
   `AUTOSCALE_{MIN,MAX}_WORKERS`, `AUTOSCALE_{UP,DOWN}_THRESHOLD`,
   `AUTOSCALE_CHECK_INTERVAL`, `AUTOSCALE_COOLDOWN`.
 
-On Kubernetes, KEDA scales the Ollama and gateway Deployments on Redis `LLEN`
-instead (see `k8s/40-keda-scaledobject.yaml`).
+On Kubernetes, KEDA owns scaling instead and the in-app autoscaler is disabled
+via the ConfigMap (`STANDBY_WORKER_URLS=""`). Two ScaledObjects in
+`k8s/40-keda-scaledobject.yaml` poll Redis `LLEN llm:request_queue` every 15s:
+
+```
+desiredReplicas = ceil(LLEN / listLength)      # listLength = 3
+
+  ollama-queue-scaler   → Ollama Deployment   1–6 replicas  (inference capacity)
+  gateway-queue-scaler  → gateway Deployment  2–6 replicas  (queue consumers)
+```
+
+Both tiers scale because the queue **consumer** is the gateway's
+`WorkerPool.blpop` loop — each gateway replica drains the queue serially, so
+scaling Ollama alone raises raw inference capacity but not consumer parallelism.
+A 60s cooldown plus a 120s scale-down stabilization window prevents thrashing.
+Drop `gateway-queue-scaler` if you'd rather pin the gateway replica count.
 
 ## Benchmark
 
@@ -169,4 +221,5 @@ Single Ollama worker, `llama3:latest` (8B, Q4_0) on **CPU** (WSL2), short prompt
 - [x] Phase 2 — Prometheus + Grafana observability
 - [x] Phase 3 — Redis queue, health checks, circuit breaker
 - [x] Phase 4 — Autoscaling (Docker + static-registration fallback)
-- [x] Phase 5 — Kubernetes + KEDA + cloud deploy
+- [x] Phase 5 — Kubernetes manifests + KEDA autoscaling on Redis queue depth +
+      cloud deploy paths (RunPod GPU workers, Railway / Fly.io gateway)
