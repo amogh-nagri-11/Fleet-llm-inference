@@ -52,16 +52,20 @@ class WorkerPool:
                 request_id = job.pop("request_id")
 
                 # Pick a worker and process
-                worker = load_balancer.pick_worker()
                 try:
-                    if "messages" in job:
-                        result = await worker.chat(**job)
-                    else:
-                        result = await worker.generate(**job)
-                    load_balancer.record_success(worker.stats.url)
+                    worker = load_balancer.pick_worker()
                 except RuntimeError as e:
-                    load_balancer.record_failure(worker.stats.url)
                     result = {"error": str(e)}
+                else:
+                    try:
+                        if "messages" in job:
+                            result = await worker.chat(**job)
+                        else:
+                            result = await worker.generate(**job)
+                        load_balancer.record_success(worker.stats.url)
+                    except RuntimeError as e:
+                        load_balancer.record_failure(worker.stats.url)
+                        result = {"error": str(e)}
 
                 # Store result for the waiting request
                 result_key = f"{self.result_prefix}{request_id}"
