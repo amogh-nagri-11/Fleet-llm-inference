@@ -1,17 +1,18 @@
 import time
 from typing import Optional
 
+from context.models import ContextItem
 from memory.models import MemoryItem, MemoryKind
+from memory.retrieval import retrieve_relevant_memories, to_context_items
 from memory.store import MemoryStore
 
 
 class MemoryManager:
     """Coordinates memory capture and retrieval for a workflow.
 
-    Phase 6 scope only: recording working/episodic memory into durable
-    storage and listing it back. Retrieval/ranking/budget injection into
-    the context pipeline is Phase 7 — REDESIGN.md §19 explicitly separates
-    "start with simple storage" (this phase) from retrieval. Memories are
+    Through Phase 7: recording working/episodic memory into durable
+    storage, listing it back, and — new this phase — ranking + budgeting +
+    injecting it into the context pipeline (REDESIGN.md §19). Memories are
     written explicitly by the caller; Fleet does not auto-extract them from
     arbitrary text (§14).
     """
@@ -61,6 +62,36 @@ class MemoryManager:
 
     async def purge_expired(self) -> int:
         return await self.store.purge_expired()
+
+    async def get_relevant_memories(
+        self,
+        workflow_id: str,
+        budget_tokens: int,
+        query: str = "",
+        kind: Optional[MemoryKind] = None,
+        weights: Optional[dict] = None,
+    ) -> list[MemoryItem]:
+        """Full §19 pipeline: retrieve candidates for the workflow, rank
+        them (relevance/importance/recency/access_frequency, §21), and
+        select down to `budget_tokens`. Not wired into the live request
+        path yet — that's Phase 9, same as context/."""
+        candidates = await self.list_for_workflow(workflow_id, kind=kind)
+        return retrieve_relevant_memories(candidates, budget_tokens, query=query, weights=weights)
+
+    async def get_relevant_context(
+        self,
+        workflow_id: str,
+        budget_tokens: int,
+        query: str = "",
+        kind: Optional[MemoryKind] = None,
+        weights: Optional[dict] = None,
+    ) -> list[ContextItem]:
+        """get_relevant_memories() + the §19 'inject' step — ready-to-use
+        ContextItems (type=MEMORY)."""
+        memories = await self.get_relevant_memories(
+            workflow_id, budget_tokens, query=query, kind=kind, weights=weights
+        )
+        return to_context_items(memories)
 
 
 memory_manager = MemoryManager()

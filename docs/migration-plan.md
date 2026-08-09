@@ -265,3 +265,46 @@ working + episodic memory only — semantic memory is deferred (§0.2).
   episodic untouched), manager TTL handling. Each test uses a unique
   `test-<uuid>` workflow id and the fixture deletes all `test-%` rows on
   teardown, so the suite is safe to run repeatedly against the same DB.
+
+## Phase 7 — memory retrieval
+
+New `memory/ranking.py` + `memory/retrieval.py`, per REDESIGN.md
+§19-21/§72 Phase 7: retrieve, rank, budget, inject.
+
+* `memory/ranking.py` — `score_memories()` implements §21's
+  `memory_score = relevance + importance + recency + access_frequency` as
+  a weighted sum (equal weights by default — §21, unlike §10, doesn't
+  commit to specific values). `recency` is normalized from
+  `last_used_at` (not `created_at`) — decay is about staleness of *usage*.
+  `access_frequency` is normalized from `access_count`. `relevance` uses a
+  new `lexical_relevance()`: deterministic word-overlap (Jaccard
+  similarity) between query and memory content — **not** semantic search.
+  Real semantic relevance needs embeddings, which are explicitly deferred
+  (§0.2); this is the same "deterministic and measurable first" approach
+  §10 already established for context selection, applied here because
+  memory retrieval needs *some* relevance signal and none was stored in
+  Phase 6 (relevance is request-specific, not intrinsic to a memory).
+  `rank_memories()` is a separate, independently-testable sort-by-score
+  step, matching §19's named "rank" stage explicitly (not folded silently
+  into budgeting).
+* `memory/retrieval.py` — `select_within_budget()` greedy-packs by
+  score/token-cost density (mirrors `context/selection.py`'s approach
+  exactly, reusing `context.models.estimate_tokens()` rather than a second
+  heuristic). `to_context_items()` is the "inject" step — converts
+  retrieved `MemoryItem`s into `ContextItem`s (`type=MEMORY`, which has
+  existed since Phase 3). `retrieve_relevant_memories()` composes rank +
+  budget over an already-fetched pool; "retrieve" itself stays a DB call
+  (`MemoryManager.list_for_workflow`), not something a pure function needs.
+* `MemoryManager.get_relevant_memories()` / `get_relevant_context()` —
+  the full retrieve→rank→budget(→inject) pipeline as manager methods.
+  Still not wired into `gateway/routes.py` or `ContextStore` — that
+  integration is Phase 9, same discipline as every context-producing
+  phase so far (the "inject" step builds `ContextItem`s but doesn't call
+  `context_manager.store.add()` itself).
+* 22 new tests added (111 total): ranking (relevance/importance/recency/
+  access_frequency each isolated via zeroed weights to prove they
+  independently affect the score, plus a single-item no-divide-by-zero
+  case), retrieval (budget respected, density preference, empty input,
+  context-item conversion), and `MemoryManager` integration tests against
+  the real DB (query-relevant memory beats an irrelevant one at equal
+  importance, budget respected, kind filtering, empty workflow).

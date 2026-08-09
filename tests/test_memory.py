@@ -5,6 +5,7 @@ import pytest
 import pytest_asyncio
 
 from config import settings
+from context.models import ContextType
 from memory.manager import MemoryManager
 from memory.models import MemoryItem, MemoryKind
 from memory.store import MemoryStore
@@ -162,6 +163,62 @@ async def test_manager_list_for_workflow_isolates_workflows(manager):
     wf1_items = await manager.list_for_workflow(wf1)
     assert len(wf1_items) == 1
     assert wf1_items[0].content == "a"
+
+
+# ── MemoryManager.get_relevant_memories / get_relevant_context (Phase 7) ─
+
+@pytest.mark.asyncio
+async def test_get_relevant_memories_picks_query_matching_item(manager):
+    workflow_id = wf_id()
+    await manager.record_episodic("auth token expiration bug in middleware", workflow_id, importance=0.5)
+    await manager.record_episodic("unrelated database migration notes " * 20, workflow_id, importance=0.5)
+
+    selected = await manager.get_relevant_memories(
+        workflow_id, budget_tokens=20, query="auth token bug"
+    )
+    contents = [i.content for i in selected]
+    assert any("auth token" in c for c in contents)
+    assert not any("migration" in c for c in contents)
+
+
+@pytest.mark.asyncio
+async def test_get_relevant_memories_respects_budget(manager):
+    workflow_id = wf_id()
+    for i in range(5):
+        await manager.record_episodic("x" * 400, workflow_id)  # ~100 tokens each
+
+    selected = await manager.get_relevant_memories(workflow_id, budget_tokens=250)
+    total_tokens = sum(max(1, len(i.content) // 4) for i in selected)
+    assert total_tokens <= 250
+
+
+@pytest.mark.asyncio
+async def test_get_relevant_memories_filters_by_kind(manager):
+    workflow_id = wf_id()
+    await manager.record_working("current objective", workflow_id)
+    await manager.record_episodic("past event", workflow_id)
+
+    working_only = await manager.get_relevant_memories(
+        workflow_id, budget_tokens=1000, kind=MemoryKind.WORKING
+    )
+    assert [i.content for i in working_only] == ["current objective"]
+
+
+@pytest.mark.asyncio
+async def test_get_relevant_context_returns_memory_type_context_items(manager):
+    workflow_id = wf_id()
+    await manager.record_episodic("test failed because of X", workflow_id, importance=0.9)
+
+    context_items = await manager.get_relevant_context(workflow_id, budget_tokens=1000)
+    assert len(context_items) == 1
+    assert context_items[0].type == ContextType.MEMORY
+    assert context_items[0].content == "test failed because of X"
+    assert context_items[0].workflow_id == workflow_id
+
+
+@pytest.mark.asyncio
+async def test_get_relevant_memories_empty_workflow_returns_empty(manager):
+    assert await manager.get_relevant_memories(wf_id(), budget_tokens=1000) == []
 
 
 def _make_item(kind, content, workflow_id):
