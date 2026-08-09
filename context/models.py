@@ -36,6 +36,10 @@ class ContextItem:
     workflow_id: Optional[str] = None
     importance: float = 0.5
     relevance: float = 0.5
+    # Set when this item is a small reference to a large stored Artifact
+    # (context/artifacts.py, §35) rather than the content itself — lets a
+    # caller fetch the full thing back by id when actually needed.
+    artifact_id: Optional[str] = None
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     token_count: int = field(init=False, default=0)
     created_at: float = field(default_factory=time.time)

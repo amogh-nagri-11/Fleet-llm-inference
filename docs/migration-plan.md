@@ -170,3 +170,41 @@ Phase 9.
   ordering (recent/full/relevance/budget_aware each verified to prefer what
   they claim to), budget_aware packing multiple small high-value items over
   one big low-value one, hybrid tie-breaking, `ContextManager` integration.
+
+## Phase 5 — artifact handling
+
+New `context/artifacts.py`, per REDESIGN.md §32-35/§72 Phase 5. Still not
+wired into `gateway/routes.py` — same reasoning as Phases 3/4, integration
+is Phase 9.
+
+* `ArtifactType` enum matches §34's list literally: `file`, `tool_output`,
+  `log`, `document`. Distinct from `ContextType` on purpose — `ContextType`
+  describes a context item's *role*, `ArtifactType` describes what kind of
+  large content is being externalized.
+* `summarize_text()` — deterministic, rule-based (keyword-match lines like
+  "error"/"fail"/"exception"/"traceback", falling back to first-N-lines if
+  nothing matches). No LLM call. Mirrors §33's worked example directly
+  ("Relevant failures: ..."). Real semantic summarization is explicitly
+  Phase 8's job (§13 — routes through the inference layer); Phase 5 only
+  needs something small and useful instead of the raw dump.
+* `Artifact` — full content + auto-computed summary/token_count.
+  `ArtifactStore.create/get/get_excerpt` (line-range retrieval, §35's
+  `relevant_ranges`) `/to_reference_item` (builds the small `ContextItem`
+  that actually goes into context — `type=SUMMARY`, `content=summary`, not
+  the raw content).
+* `context/models.py` — added `ContextItem.artifact_id: Optional[str]`, the
+  natural link back to the full artifact (§35's reference JSON shape).
+  Small, additive change to a Phase 3 model, not a redesign of it.
+* `ContextManager.record_artifact()` — creates the artifact + stores only
+  the reference item, in one call. `get_artifact()`/`get_artifact_excerpt()`
+  close the retrieval loop from §33 ("the agent can request the full output
+  when necessary").
+* **Deliberately not built yet:** automatic large-vs-small routing (no
+  token-count threshold that decides `record()` vs `record_artifact()` for
+  you) — callers choose explicitly for now, keeping behavior predictable
+  rather than adding an implicit heuristic nobody asked for yet.
+* 14 new tests added (78 total): summarizer keyword-matching/fallback/
+  truncation-notice behavior, artifact creation, store CRUD + excerpt
+  retrieval, reference-item size (asserted at least 10x smaller than the
+  artifact it points to), full `ContextManager` round-trip (record → small
+  reference in context → fetch full content/excerpt back by id).
