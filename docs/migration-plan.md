@@ -308,3 +308,51 @@ New `memory/ranking.py` + `memory/retrieval.py`, per REDESIGN.md
   context-item conversion), and `MemoryManager` integration tests against
   the real DB (query-relevant memory beats an irrelevant one at equal
   importance, budget respected, kind filtering, empty workflow).
+
+## Phase 8 — context compression
+
+New `context/compression.py`, per REDESIGN.md §13/§72 Phase 8: "old
+conversation -> summary -> compressed context." This is the **first phase
+that actually calls the inference layer** — every prior context/memory
+phase (3-7) was deliberately deterministic/no-LLM. §13 explicitly wants
+this: "the summarization backend can use the same inference infrastructure,"
+describing a recursive workflow (Fleet requests summarization, which is
+itself an inference request through the existing worker layer).
+
+* `Summarizer` is an injected async callable (`str -> str`), not a
+  hardcoded live call — `compress_items()` and `ContextManager.
+  compress_old_context()` stay unit-testable without a running model, same
+  as every prior phase. `llm_summarizer()` is the one real implementation,
+  passed in explicitly by whoever calls compression in production.
+* `llm_summarizer()` routes through `router.load_balancer` — the same
+  `pick_worker()`/`generate()`/`record_success`/`record_failure` path as
+  `gateway/routes.py`, including the exact **same fixed pattern from Phase
+  1**: `pick_worker()` sits outside the try/except, so a "no workers
+  available" error isn't wrongly blamed on a worker that was never picked.
+  Regression-guarded with the same style of test used for that original fix.
+* This is the first import from `context/` into `router/` — checked for
+  cycles (`router`/`workers`/`config` import nothing from `context`) before
+  wiring it in; none exist.
+* `CompressionResult` — `tokens_before`/`tokens_after`/`tokens_saved`,
+  satisfying §13's explicit "this should be measurable" instruction.
+* `ContextManager.compress_old_context(workflow_id, summarizer, max_items,
+  context_type)` — takes the oldest items (optionally one type only),
+  replaces them in the store with a single `SUMMARY` item. Explicit,
+  caller-invoked — not triggered automatically when a workflow goes over
+  budget, same "no implicit heuristic nobody asked for yet" stance as
+  Phase 5's `record()` vs `record_artifact()`. Still not wired into
+  `gateway/routes.py` — that's Phase 9.
+* **Not tested against a live model.** Ollama is currently not running in
+  this environment (connection refused on :11434 — same underlying
+  install issue flagged earlier in this session, still unresolved). All
+  compression tests use `fake_summarizer`/mocked workers, consistent with
+  how the rest of the suite avoids depending on a live Ollama instance.
+  `llm_summarizer()` itself is real, tested end-to-end down to the mocked
+  worker boundary — only the actual model call is unverified live.
+* 14 new tests added (125 total): pure `compress_items()` behavior
+  (summary type/source, workflow/agent_id inheritance, importance = max of
+  originals, empty-list rejection, real token-savings measurement),
+  `llm_summarizer()` against a mocked worker (prompt/model passed through,
+  success/failure paths, the no-worker-available regression guard), and
+  `ContextManager.compress_old_context()` integration (store mutation,
+  `max_items`, type filtering, empty-workflow no-op).

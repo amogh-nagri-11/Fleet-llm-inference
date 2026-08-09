@@ -1,6 +1,7 @@
 from typing import Optional
 
 from context.artifacts import Artifact, ArtifactStore, ArtifactType
+from context.compression import CompressionResult, Summarizer, compress_items
 from context.models import ContextItem, ContextType
 from context.selection import SelectionResult, select_context
 from context.store import ContextStore
@@ -9,14 +10,13 @@ from context.store import ContextStore
 class ContextManager:
     """Coordinates context capture and retrieval for a workflow.
 
-    Through Phase 5: turning inference-relevant content into stored
+    Through Phase 8: turning inference-relevant content into stored
     ContextItems, returning the unranked candidate pool, selecting a
-    budget-fitting subset (Phase 4), and — new this phase — externalizing
-    large content as artifacts so only a small reference lands in context
-    (Phase 5). Compression (Phase 8) and memory retrieval (Phase 6/7) still
-    aren't part of this pipeline yet — REDESIGN.md §8 lists them as Context
-    Engine responsibilities, but the doc's own phase breakdown (§72) builds
-    them incrementally rather than all at once.
+    budget-fitting subset (Phase 4), externalizing large content as
+    artifacts (Phase 5), and — new this phase — compressing old context
+    into a single summary item via the inference layer (Phase 8). Memory
+    retrieval (Phase 7) lives in MemoryManager and isn't merged into this
+    pipeline yet — that integration is Phase 9.
     """
 
     def __init__(
@@ -82,6 +82,38 @@ class ContextManager:
 
     def total_tokens(self, workflow_id: str) -> int:
         return self.store.total_tokens(workflow_id)
+
+    async def compress_old_context(
+        self,
+        workflow_id: str,
+        summarizer: Summarizer,
+        max_items: Optional[int] = None,
+        context_type: Optional[ContextType] = None,
+    ) -> Optional[CompressionResult]:
+        """REDESIGN.md §13: old conversation -> summary -> compressed
+        context. Takes the oldest items for a workflow (optionally filtered
+        to one type, e.g. only CONVERSATION), replaces them in the store
+        with a single summary ContextItem. Not triggered automatically —
+        the caller decides when compression is worth it, same explicit-
+        choice pattern as record() vs record_artifact() (Phase 5). Returns
+        None if there's nothing to compress."""
+        candidates = self.get_candidate_context(workflow_id)
+        if context_type is not None:
+            candidates = [c for c in candidates if c.type == context_type]
+        candidates.sort(key=lambda i: i.created_at)
+        if max_items is not None:
+            candidates = candidates[:max_items]
+
+        if not candidates:
+            return None
+
+        result = await compress_items(candidates, summarizer, workflow_id=workflow_id)
+
+        for item in result.original_items:
+            self.store.delete(item.id)
+        self.store.add(result.summary_item)
+
+        return result
 
 
 context_manager = ContextManager()
