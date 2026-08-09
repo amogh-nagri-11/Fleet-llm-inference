@@ -87,3 +87,33 @@ fuller §6 example schema — `context_budget`, `priority`, SLO fields, and
 * 5 new tests added (34 total): metadata round-trip on `/generate`/`/chat`,
   auto-generated vs. caller-supplied `request_id`, and the queue-side
   stripping regression guard above.
+
+## Phase 3 — context abstraction
+
+New `context/` package, per REDESIGN.md §7/§72 Phase 3. Not wired into the
+live request path yet — that integration is explicitly Phase 9 ("connect
+the context engine to the existing worker scheduler"). Building it in now
+would mean half-wiring a feature before ranking (Phase 4), memory (Phase
+6/7), and compression (Phase 8) exist to feed it, so `gateway/routes.py` is
+untouched this phase.
+
+* `context/models.py` — `ContextItem` dataclass (id, type, content,
+  token_count, created_at, last_accessed_at, importance, relevance, source,
+  agent_id, workflow_id) and `ContextType` enum, exactly the fields/types
+  listed in §7. `estimate_tokens()` is a rough ~4-chars/token heuristic,
+  explicitly documented as not a real tokenizer — Phase 4 owns actual
+  budgeting math and can swap it without changing `ContextItem`'s shape.
+* `context/store.py` — `ContextStore`, in-memory only (no Postgres until
+  Phase 6), scoped by `workflow_id`. `add`/`get`/`list_for_workflow`
+  (optionally filtered by type)/`delete`/`clear_workflow`/`total_tokens`.
+* `context/manager.py` — `ContextManager.record()` creates+stores an item;
+  `get_candidate_context(workflow_id)` returns the **unranked, unbudgeted**
+  pool for a workflow — deliberately not doing selection/ranking/packing
+  yet, that's Phase 4. Module-level `context_manager` singleton, matching
+  the existing pattern (`load_balancer`, `worker_pool`, `autoscaler`).
+* **Deliberately not built yet:** full context lifecycle state machine
+  (§36 — ARCHIVED/EXPIRED), ranking/selection (Phase 4), compression (Phase
+  8). `ContextItem` only tracks `created_at`/`last_accessed_at` for now.
+* 14 new tests added (48 total): token estimation, item creation/touch,
+  store CRUD + workflow scoping/isolation + type filtering, manager
+  record/retrieve/isolation.
