@@ -12,7 +12,16 @@ router = APIRouter()
 
 # ── Request Models ────────────────────────────────────────
 
-class GenerateRequest(BaseModel):
+class AgentMetadata(BaseModel):
+    """Identity fields that let Fleet associate a request with an agent
+    workflow. All optional — a plain API caller doesn't need any of this.
+    See REDESIGN.md §5."""
+    agent_id: Optional[str] = None
+    workflow_id: Optional[str] = None
+    request_id: Optional[str] = None
+    parent_request_id: Optional[str] = None
+
+class GenerateRequest(AgentMetadata):
     prompt: str
     model: Optional[str] = None
     stream: bool = False
@@ -21,7 +30,7 @@ class Message(BaseModel):
     role: str   # "user" | "assistant" | "system"
     content: str
 
-class ChatRequest(BaseModel):
+class ChatRequest(AgentMetadata):
     messages: List[Message]
     model: Optional[str] = None
 
@@ -31,6 +40,26 @@ class ChatRequest(BaseModel):
 def verify_api_key(x_api_key: Optional[str] = Header(None)):
     if x_api_key != settings.API_KEY:
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
+
+
+# ── Agent metadata helper ───────────────────────────────────
+# Fleet only needs enough identity to understand which requests belong to
+# which agent workflow (REDESIGN.md §5/§6) — it does not interpret agent
+# reasoning. request_id is generated here if the caller doesn't supply one,
+# so every request is traceable even from plain (non-agent) callers.
+
+def resolve_agent_metadata(req: AgentMetadata, endpoint: str) -> dict:
+    meta = {"request_id": req.request_id or str(uuid.uuid4())}
+    if req.agent_id is not None:
+        meta["agent_id"] = req.agent_id
+    if req.workflow_id is not None:
+        meta["workflow_id"] = req.workflow_id
+    if req.parent_request_id is not None:
+        meta["parent_request_id"] = req.parent_request_id
+
+    fields = " ".join(f"{k}={v}" for k, v in meta.items())
+    print(f"[Fleet] event=received endpoint={endpoint} {fields}")
+    return meta
 
 
 # ── Routes ────────────────────────────────────────────────
@@ -51,6 +80,7 @@ async def health():
 async def generate(req: GenerateRequest, x_api_key: Optional[str] = Header(None)):
     verify_api_key(x_api_key)
 
+    meta = resolve_agent_metadata(req, "/generate")
     model = req.model or settings.DEFAULT_MODEL
 
     try:
@@ -61,7 +91,7 @@ async def generate(req: GenerateRequest, x_api_key: Optional[str] = Header(None)
     try:
         result = await worker.generate(model=model, prompt=req.prompt)
         load_balancer.record_success(worker.stats.url)
-        return result
+        return {**meta, **result}
     except RuntimeError as e:
         load_balancer.record_failure(worker.stats.url)
         raise HTTPException(status_code=503, detail=str(e))
@@ -71,6 +101,7 @@ async def generate(req: GenerateRequest, x_api_key: Optional[str] = Header(None)
 async def chat(req: ChatRequest, x_api_key: Optional[str] = Header(None)):
     verify_api_key(x_api_key)
 
+    meta = resolve_agent_metadata(req, "/chat")
     model = req.model or settings.DEFAULT_MODEL
 
     try:
@@ -82,7 +113,7 @@ async def chat(req: ChatRequest, x_api_key: Optional[str] = Header(None)):
         messages = [m.model_dump() for m in req.messages]
         result = await worker.chat(model=model, messages=messages)
         load_balancer.record_success(worker.stats.url)
-        return result
+        return {**meta, **result}
     except RuntimeError as e:
         load_balancer.record_failure(worker.stats.url)
         raise HTTPException(status_code=503, detail=str(e))
@@ -94,23 +125,27 @@ async def workers(x_api_key: Optional[str] = Header(None)):
     await load_balancer.health_check_all()
     return load_balancer.get_worker_stats()
 
-@router.post("/queued/generate") 
-async def queued_generate(req: GenerateRequest, x_api_key: Optional[str] = Header(None)): 
-    verify_api_key(x_api_key) 
-    
-    request_id = str(uuid.uuid4()) 
-    model = req.model or settings.DEFAULT_MODEL 
+@router.post("/queued/generate")
+async def queued_generate(req: GenerateRequest, x_api_key: Optional[str] = Header(None)):
+    verify_api_key(x_api_key)
+
+    meta = resolve_agent_metadata(req, "/queued/generate")
+    request_id = meta["request_id"]
+    model = req.model or settings.DEFAULT_MODEL
 
     await worker_pool.enqueue(request_id, {
-        "model": model, 
-        "prompt": req.prompt, 
+        "model": model,
+        "prompt": req.prompt,
+        "agent_id": req.agent_id,
+        "workflow_id": req.workflow_id,
+        "parent_request_id": req.parent_request_id,
     })
 
-    result = await worker_pool.get_result(request_id) 
-    if not result: 
-        raise HTTPException(status_code=504, detail="Request timed out in queue") 
-    
-    return {"request_id": request_id, **result} 
+    result = await worker_pool.get_result(request_id)
+    if not result:
+        raise HTTPException(status_code=504, detail="Request timed out in queue")
+
+    return {**meta, **result}
 
 @router.get("/queue/depth") 
 async def queue_depth(x_api_key: Optional[str] = Header(None)): 

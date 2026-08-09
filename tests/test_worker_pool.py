@@ -86,3 +86,43 @@ async def test_successful_job_writes_result_and_records_success(monkeypatch):
     result = json.loads(redis.stored["llm:result:req-2"])
     assert result["response"] == "ok"
     assert called == ["http://fake"]
+
+
+class StrictWorker:
+    """Mirrors OllamaClient.generate's real signature (no **kwargs) so a
+    leaked agent_id/workflow_id kwarg would raise TypeError instead of
+    silently being absorbed."""
+    stats = type("Stats", (), {"url": "http://fake"})()
+
+    async def generate(self, model, prompt, stream=False):
+        return {"response": "ok"}
+
+
+@pytest.mark.asyncio
+async def test_agent_metadata_is_stripped_before_dispatch_to_worker(monkeypatch):
+    """Phase 2 regression guard: agent_id/workflow_id/parent_request_id ride
+    along in the queue payload but must not be forwarded as inference
+    kwargs."""
+    job = json.dumps({
+        "request_id": "req-3",
+        "model": "llama3",
+        "prompt": "hi",
+        "agent_id": "coding-agent-42",
+        "workflow_id": "workflow-123",
+        "parent_request_id": "req-1",
+    })
+    redis = FakeRedis(jobs=[job])
+
+    monkeypatch.setattr(load_balancer, "pick_worker", lambda: StrictWorker())
+    monkeypatch.setattr(load_balancer, "record_success", lambda url: None)
+
+    pool = WorkerPool()
+    pool.redis = redis
+
+    await run_one_iteration(pool)
+
+    # If the metadata had leaked into **job, StrictWorker.generate() would
+    # have raised TypeError and the outer except would have logged it
+    # without writing a result at all.
+    result = json.loads(redis.stored["llm:result:req-3"])
+    assert result == {"response": "ok"}

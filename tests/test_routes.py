@@ -179,3 +179,85 @@ def test_queued_generate_times_out(monkeypatch):
 
     resp = client.post("/api/v1/queued/generate", json={"prompt": "hi"}, headers=HEADERS)
     assert resp.status_code == 504
+
+
+# ── Agent/workflow metadata (Phase 2) ─────────────────────────
+
+def test_generate_without_metadata_gets_auto_request_id(monkeypatch):
+    monkeypatch.setattr(load_balancer, "pick_worker", lambda: FakeWorker())
+    monkeypatch.setattr(load_balancer, "record_success", lambda url: None)
+
+    resp = client.post("/api/v1/generate", json={"prompt": "hi"}, headers=HEADERS)
+    body = resp.json()
+    assert "request_id" in body and body["request_id"]
+    assert "agent_id" not in body  # omitted, not sent back as null
+
+
+def test_generate_echoes_supplied_agent_metadata(monkeypatch):
+    monkeypatch.setattr(load_balancer, "pick_worker", lambda: FakeWorker())
+    monkeypatch.setattr(load_balancer, "record_success", lambda url: None)
+
+    resp = client.post(
+        "/api/v1/generate",
+        json={
+            "prompt": "hi",
+            "agent_id": "coding-agent-42",
+            "workflow_id": "workflow-123",
+            "request_id": "req-456",
+            "parent_request_id": "req-400",
+        },
+        headers=HEADERS,
+    )
+    body = resp.json()
+    assert body["agent_id"] == "coding-agent-42"
+    assert body["workflow_id"] == "workflow-123"
+    assert body["request_id"] == "req-456"
+    assert body["parent_request_id"] == "req-400"
+
+
+def test_chat_echoes_supplied_agent_metadata(monkeypatch):
+    monkeypatch.setattr(load_balancer, "pick_worker", lambda: FakeWorker())
+    monkeypatch.setattr(load_balancer, "record_success", lambda url: None)
+
+    resp = client.post(
+        "/api/v1/chat",
+        json={
+            "messages": [{"role": "user", "content": "hi"}],
+            "agent_id": "research-agent-1",
+            "workflow_id": "workflow-7",
+        },
+        headers=HEADERS,
+    )
+    body = resp.json()
+    assert body["agent_id"] == "research-agent-1"
+    assert body["workflow_id"] == "workflow-7"
+
+
+def test_queued_generate_uses_supplied_request_id_and_forwards_metadata(monkeypatch):
+    captured = {}
+
+    async def fake_enqueue(request_id, payload):
+        captured["request_id"] = request_id
+        captured["payload"] = payload
+
+    async def fake_get_result(request_id, timeout=120):
+        return {"response": "ok"}
+
+    monkeypatch.setattr(worker_pool, "enqueue", fake_enqueue)
+    monkeypatch.setattr(worker_pool, "get_result", fake_get_result)
+
+    resp = client.post(
+        "/api/v1/queued/generate",
+        json={
+            "prompt": "hi",
+            "agent_id": "batch-agent-9",
+            "workflow_id": "workflow-99",
+            "request_id": "req-fixed-id",
+        },
+        headers=HEADERS,
+    )
+    assert resp.status_code == 200
+    assert resp.json()["request_id"] == "req-fixed-id"
+    assert captured["request_id"] == "req-fixed-id"
+    assert captured["payload"]["agent_id"] == "batch-agent-9"
+    assert captured["payload"]["workflow_id"] == "workflow-99"

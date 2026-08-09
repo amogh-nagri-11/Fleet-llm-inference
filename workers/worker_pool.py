@@ -50,6 +50,16 @@ class WorkerPool:
                 _, job_str = job_raw
                 job = json.loads(job_str)
                 request_id = job.pop("request_id")
+                # Agent metadata rides along in the queue payload for
+                # tracing/future scheduling use, but isn't an inference
+                # kwarg — strip it before **job is passed to the worker.
+                agent_meta = {
+                    "agent_id": job.pop("agent_id", None),
+                    "workflow_id": job.pop("workflow_id", None),
+                    "parent_request_id": job.pop("parent_request_id", None),
+                }
+                print(f"[WorkerPool] event=dequeued request_id={request_id} "
+                      f"agent_id={agent_meta['agent_id']} workflow_id={agent_meta['workflow_id']}")
 
                 # Pick a worker and process
                 try:

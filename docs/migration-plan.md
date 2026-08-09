@@ -60,3 +60,30 @@ Docker-vs-static fallback, and all routing strategies are unchanged in behavior.
 `gateway/routes.py` was already fixed in `workers/worker_pool.py` on `main`
 (commit `c86216a`, prior to branching). Not backported further — `main` and
 this branch now agree on the queue-side fix; the route-side fix is new here.
+
+## Phase 2 — request/workflow metadata
+
+Scope kept to identity fields only, per REDESIGN.md §72 Phase 2 (not the
+fuller §6 example schema — `context_budget`, `priority`, SLO fields, and
+`memory{}` belong to their own later phases).
+
+* `gateway/routes.py` — `agent_id`, `workflow_id`, `request_id`,
+  `parent_request_id` added as an `AgentMetadata` base model shared by
+  `GenerateRequest`/`ChatRequest`. All optional. `request_id` is
+  server-generated when the caller omits it, so every request is traceable
+  regardless of whether the caller is agent-aware. Echoed back in the
+  response (only non-null fields, to keep the response shape stable for
+  existing callers). Logged at receipt (`event=received`) per §36's log
+  correlation guidance — full tracing infra is still Phase 13.
+* `workers/worker_pool.py` — the three metadata fields ride along in the
+  Redis queue payload for `/queued/generate`, but are explicitly popped
+  before `**job` is spread into `worker.generate()`/`worker.chat()` (those
+  methods don't accept them — this would have been a `TypeError` on every
+  queued request otherwise). Covered by
+  `test_agent_metadata_is_stripped_before_dispatch_to_worker`.
+* **Deliberately not built yet:** persistent workflow state (§37 — status,
+  step, last_error). That needs a durable store, which arrives with
+  PostgreSQL in Phase 6. Phase 2 is pure request/response identity plumbing.
+* 5 new tests added (34 total): metadata round-trip on `/generate`/`/chat`,
+  auto-generated vs. caller-supplied `request_id`, and the queue-side
+  stripping regression guard above.
