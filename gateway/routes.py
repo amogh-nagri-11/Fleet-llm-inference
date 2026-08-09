@@ -52,7 +52,11 @@ async def generate(req: GenerateRequest, x_api_key: Optional[str] = Header(None)
     verify_api_key(x_api_key)
 
     model = req.model or settings.DEFAULT_MODEL
-    worker = load_balancer.pick_worker()
+
+    try:
+        worker = load_balancer.pick_worker()
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
     try:
         result = await worker.generate(model=model, prompt=req.prompt)
@@ -68,7 +72,11 @@ async def chat(req: ChatRequest, x_api_key: Optional[str] = Header(None)):
     verify_api_key(x_api_key)
 
     model = req.model or settings.DEFAULT_MODEL
-    worker = load_balancer.pick_worker()
+
+    try:
+        worker = load_balancer.pick_worker()
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
     try:
         messages = [m.model_dump() for m in req.messages]

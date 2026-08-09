@@ -7,7 +7,7 @@ from config import settings
 
 class LoadBalancer:
     def __init__(self, worker_urls: List[str]):
-        self.workers = [OllamaClient(url) for url in worker_urls]
+        self.workers = [OllamaClient(url, timeout=settings.REQUEST_TIMEOUT) for url in worker_urls]
         self.breakers = {url: CircuitBreaker(url) for url in worker_urls}
         self._rr_index = 0
 
@@ -45,7 +45,7 @@ class LoadBalancer:
         Idempotent — returns False if the worker is already registered."""
         if self.has_worker(url):
             return False
-        self.workers.append(OllamaClient(url))
+        self.workers.append(OllamaClient(url, timeout=settings.REQUEST_TIMEOUT))
         self.breakers[url] = CircuitBreaker(url)
         return True
 
