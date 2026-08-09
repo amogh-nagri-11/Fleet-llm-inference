@@ -117,3 +117,56 @@ untouched this phase.
 * 14 new tests added (48 total): token estimation, item creation/touch,
   store CRUD + workflow scoping/isolation + type filtering, manager
   record/retrieve/isolation.
+
+## Phase 4 — context budgeting
+
+New `context/selection.py`, per REDESIGN.md §9-§12/§72 Phase 4. Still not
+wired into `gateway/routes.py` — same reasoning as Phase 3, integration is
+Phase 9.
+
+* Five policies exactly per §11: `full` (chronological baseline — what a
+  naive system does, just append history until it doesn't fit), `recent`,
+  `relevance`, `budget_aware` (greedy pack by `importance/token_count`
+  density), `hybrid` (recommended — greedy pack by weighted
+  relevance+recency+importance score / token_count, §10's formula).
+* §10's formula also has a `workflow_weight * workflow_match` term — omitted
+  and documented in-code: every candidate already comes pre-scoped to one
+  workflow via `ContextStore.list_for_workflow`, so that term is a constant
+  1.0 until Phase 7 (memory retrieval) introduces cross-workflow candidates.
+* Packing is greedy (first-fit-decreasing by the policy's key), per §12's
+  explicit instruction not to build a full knapsack solver "unless
+  benchmarking shows it is necessary" — it doesn't, yet.
+* `ContextManager.get_budgeted_context(workflow_id, budget_tokens, policy)`
+  composes `get_candidate_context()` + `select_context()`.
+* `config/settings.py` / `.env.example` — added `CONTEXT_BUDGET_DEFAULT`
+  (8192) and `CONTEXT_SELECTION_POLICY` (hybrid), unused until Phase 9 wires
+  them in, but defined now alongside the concept they configure.
+* **Benchmarked** (§72's explicit instruction for this phase) via
+  `scripts/benchmark_context_selection.py` — a synthetic coding-agent
+  workflow (30 steps, mostly small conversation/tool-result items, a few
+  large tool dumps, occasional high-importance errors), 4000-token budget:
+
+  ```
+  Policy          Selected Tok   Saved Tok     Items  Avg Importance
+  ------------------------------------------------------------------
+  full                    3996        4700     16/31           0.410
+  recent                  4000        4696     11/31           0.457
+  relevance               3996        4700     25/31           0.457
+  budget_aware            3696        5000     27/31           0.427
+  hybrid                  3696        5000     27/31           0.427
+  ```
+
+  This is a mechanics check (does packing respect the budget, does it favor
+  higher-value items, how many tokens does each policy save), not the §53
+  "Full History vs Budgeted Context" experiment — that needs a live model
+  and task-success measurement against real agent workloads, which is
+  Phase 14. Numbers above are real output from the script, not invented
+  (§39/§60), reproducible with `--seed 42` (the default).
+* **Deliberately not built yet:** compression (Phase 8), memory-sourced
+  candidates (Phase 6/7), a real tokenizer (still the Phase 3 ~4-char
+  heuristic — swapping it doesn't change any policy's logic).
+* 16 new tests added (64 total): every policy respects budget, unknown
+  policy raises, empty input, budget larger than everything, policy-specific
+  ordering (recent/full/relevance/budget_aware each verified to prefer what
+  they claim to), budget_aware packing multiple small high-value items over
+  one big low-value one, hybrid tie-breaking, `ContextManager` integration.

@@ -20,6 +20,13 @@ REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", 120))
 # ── Routing ────────────────────────────────────────────
 ROUTING_STRATEGY = os.getenv("ROUTING_STRATEGY", "round_robin")
 
+# ── Context budgeting ──────────────────────────────────
+# Default max input tokens the context selector packs a workflow's context
+# down to (REDESIGN.md §9). Not wired into the live request path yet —
+# that's Phase 9.
+CONTEXT_BUDGET_DEFAULT   = int(os.getenv("CONTEXT_BUDGET_DEFAULT", 8192))
+CONTEXT_SELECTION_POLICY = os.getenv("CONTEXT_SELECTION_POLICY", "hybrid")
+
 # ── Autoscaling ────────────────────────────────────────
 # Standby Ollama URLs the autoscaler registers into the load balancer at
 # runtime when Docker container spin-up is unavailable (e.g. WSL without a
