@@ -46,6 +46,17 @@ REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
 REDIS_DB   = int(os.getenv("REDIS_DB", 0))
 
+# ── Memory storage (PostgreSQL, REDESIGN.md §18) ───────
+# MEMORY_DB_HOST can be a hostname (TCP) or a unix socket directory (e.g.
+# /var/run/postgresql) for local peer-auth dev — asyncpg supports both via
+# the same `host` kwarg. Durable storage for working/episodic memory only;
+# semantic memory / vector search stays out of scope (§0.2).
+MEMORY_DB_HOST     = os.getenv("MEMORY_DB_HOST", "localhost")
+MEMORY_DB_PORT     = int(os.getenv("MEMORY_DB_PORT", 5432))
+MEMORY_DB_NAME     = os.getenv("MEMORY_DB_NAME", "fleet")
+MEMORY_DB_USER     = os.getenv("MEMORY_DB_USER", "fleet")
+MEMORY_DB_PASSWORD = os.getenv("MEMORY_DB_PASSWORD", "")
+
 # ── Circuit Breaker ────────────────────────────────────
 CIRCUIT_BREAKER_THRESHOLD = int(os.getenv("CIRCUIT_BREAKER_THRESHOLD", 5))
 CIRCUIT_BREAKER_TIMEOUT   = int(os.getenv("CIRCUIT_BREAKER_TIMEOUT", 30))

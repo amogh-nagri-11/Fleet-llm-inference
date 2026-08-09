@@ -13,10 +13,14 @@ services:
     environment:
       - WORKER_URLS=http://worker1:11434,http://worker2:11434
       - REDIS_HOST=redis
+      - MEMORY_DB_HOST=postgres
+      - MEMORY_DB_USER=fleet
+      - MEMORY_DB_PASSWORD=fleet_dev_password
     depends_on:
       - redis
       - worker1
       - worker2
+      - postgres
     volumes:
       - ./config:/app/config
       - ./router:/app/router
@@ -34,6 +38,25 @@ services:
       - inference-net
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Memory storage (working/episodic memory, §18) ────
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_DB=fleet
+      - POSTGRES_USER=fleet
+      - POSTGRES_PASSWORD=fleet_dev_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - inference-net
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "fleet"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -94,6 +117,7 @@ volumes:
   ollama_worker1:
   ollama_worker2:
   grafana_data:
+  postgres_data:
 
 networks:
   inference-net:

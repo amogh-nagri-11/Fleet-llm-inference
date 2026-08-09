@@ -208,3 +208,60 @@ is Phase 9.
   retrieval, reference-item size (asserted at least 10x smaller than the
   artifact it points to), full `ContextManager` round-trip (record → small
   reference in context → fetch full content/excerpt back by id).
+
+## Phase 6 — memory (working + episodic only)
+
+New `memory/` package, per REDESIGN.md §14-§21/§72 Phase 6. Scope is
+working + episodic memory only — semantic memory is deferred (§0.2).
+
+* **New infrastructure dependency: PostgreSQL.** Not available as a
+  container here (`CLAUDE.md`'s own gotcha — no Docker in this WSL
+  environment), so installed natively (`apt-get install postgresql`), same
+  tier as Redis/Ollama in this setup. Asked the user how to handle this
+  before writing any code, since introducing a new external dependency
+  isn't a call to make unilaterally; they chose native install + peer auth
+  (a `fleet` OS-user-matching role, unix-socket connection, no password) —
+  the config stays generic enough (`MEMORY_DB_HOST` accepts either a
+  hostname for TCP or a socket directory for peer auth) that a real
+  password-based TCP role works too without code changes.
+* `memory/models.py` — `MemoryKind` (`working`/`episodic` only — see §0.2),
+  `MemoryItem` (id, kind, content, agent_id, workflow_id, importance,
+  created_at, last_used_at, access_count, expires_at). No `relevance`
+  field, unlike `ContextItem`: relevance is judged against a specific
+  request at retrieval time (Phase 7), not intrinsic to the memory — §20's
+  own metadata list doesn't include it either.
+* `memory/store.py` — `MemoryStore`, asyncpg-backed. `ensure_schema()` runs
+  idempotent `CREATE TABLE IF NOT EXISTS` (no migration framework yet,
+  matching §18's "start with simple storage"). `get()` updates
+  `last_used_at`/`access_count` on read (§20's access tracking).
+  `purge_expired()` removes working memory past `expires_at` (§15) —
+  episodic memory has no `expires_at` and is never touched by it.
+* `memory/manager.py` — `MemoryManager.record_working()` (accepts
+  `ttl_seconds`, sets `expires_at`) / `record_episodic()` (never expires) /
+  `list_for_workflow()`. Async throughout, unlike `ContextManager` — this
+  is genuinely doing I/O now, not in-memory bookkeeping.
+* `config/settings.py` / `.env.example` — `MEMORY_DB_HOST/PORT/NAME/USER/
+  PASSWORD`. Generic defaults (`fleet`/`localhost`), not the actual local
+  peer-auth username — that only lives in the gitignored local `.env`.
+* `docker-compose.yml` — added a `postgres` service (image
+  `postgres:16-alpine`, health-checked, same pattern as `redis`) so the
+  Docker path stays consistent with what local dev now needs. Untested
+  here (no Docker in this WSL environment) — config-only, mirrors the
+  `redis` service's established shape exactly.
+* **Deliberately not built yet:** memory retrieval/ranking/injection into
+  the context pipeline (§19 — that's Phase 7), decay scoring (§21 — also
+  Phase 7, it's a retrieval-time ranking concern). Migrating `ContextStore`/
+  `ArtifactStore` (Phase 3/5) to Postgres — REDESIGN.md §72's Phase 6 text
+  says only "working memory, episodic memory," not "make everything
+  durable"; those stay in-memory. A `workflows`/`agents` table (§18's
+  architecture diagram lists them) — no phase in §72 actually asks for a
+  workflow-state table; the note in the Phase 2 entry above overstated
+  this as arriving "with Postgres in Phase 6" — correcting that here:
+  workflow state (§37) remains unscheduled, not tied to a specific phase.
+* 11 new tests added (89 total), run against the real local Postgres
+  instance (not mocked — asyncpg against a fake is more effort than value
+  here, and the real DB is now available): store CRUD, access tracking on
+  `get()`, workflow/kind scoping, expiry purge (working memory only,
+  episodic untouched), manager TTL handling. Each test uses a unique
+  `test-<uuid>` workflow id and the fixture deletes all `test-%` rows on
+  teardown, so the suite is safe to run repeatedly against the same DB.
