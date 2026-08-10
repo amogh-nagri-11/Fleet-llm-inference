@@ -164,11 +164,25 @@ class WorkerPool:
         self._recovery_task = asyncio.create_task(self._recovery_loop())
         print("[WorkerPool] Started")
 
-    def stop(self):
-        if self._task:
-            self._task.cancel()
-        if self._recovery_task:
-            self._recovery_task.cancel()
+    async def stop(self):
+        """Cancels both loop tasks, waits for them to actually finish
+        unwinding, then releases the Redis connection pool connect()
+        opened. Previously sync and didn't close self.redis at all — every
+        shutdown leaked the pool (harmless for one long-lived process, but
+        real under repeated restarts)."""
+        for task in (self._task, self._recovery_task):
+            if task:
+                task.cancel()
+        for task in (self._task, self._recovery_task):
+            if task:
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+        if self.redis:
+            await self.redis.aclose()
+            self.redis = None
 
 
 worker_pool = WorkerPool()

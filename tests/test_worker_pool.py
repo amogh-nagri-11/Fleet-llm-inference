@@ -170,8 +170,11 @@ async def pool():
     p.dead_letter_key = f"llm:stream:test-dlq:{suffix}"
     await p.connect()
     yield p
-    await p.redis.delete(p.queue_key, p.dead_letter_key)
-    await p.redis.aclose()
+    # A test may have already called pool.stop(), which closes and nulls
+    # out self.redis — guard against tearing down twice.
+    if p.redis:
+        await p.redis.delete(p.queue_key, p.dead_letter_key)
+        await p.redis.aclose()
 
 
 async def run_briefly(coro_factory, seconds=0.3):
@@ -182,6 +185,31 @@ async def run_briefly(coro_factory, seconds=0.3):
         await task
     except asyncio.CancelledError:
         pass
+
+
+@pytest.mark.asyncio
+async def test_stop_cancels_tasks_and_closes_redis(pool):
+    """Regression test: stop() used to only cancel tasks and never close
+    self.redis, leaking the connection pool on every shutdown."""
+    pool.start()
+    await asyncio.sleep(0.05)
+
+    await pool.stop()
+
+    assert pool._task.cancelled() or pool._task.done()
+    assert pool._recovery_task.cancelled() or pool._recovery_task.done()
+    assert pool.redis is None
+
+    # Clean up the test's stream/DLQ keys with a fresh connection, since
+    # pool.redis is gone now — this is what the `pool` fixture normally
+    # does, but it guards against a double-close for exactly this case.
+    import redis.asyncio as aioredis
+    cleanup = aioredis.from_url(
+        f"redis://{settings.REDIS_HOST}:{settings.REDIS_PORT}/{settings.REDIS_DB}",
+        decode_responses=True,
+    )
+    await cleanup.delete(pool.queue_key, pool.dead_letter_key)
+    await cleanup.aclose()
 
 
 @pytest.mark.asyncio

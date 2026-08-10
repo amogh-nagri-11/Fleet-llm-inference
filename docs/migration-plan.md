@@ -634,3 +634,38 @@ Fix: split measuring from recording.
   must still succeed), `/queued/generate` provably not recording anything
   itself, and two `WorkerPool._process_job()`-level tests (rejected job
   records nothing, accepted job records exactly one `CONVERSATION` item).
+
+## Post-Phase-9 fix — memory_manager not connected, WorkerPool.stop() leaking Redis
+
+Two more findings from the same audit, both about lifecycle wiring rather
+than request-handling correctness.
+
+* **`memory_manager` was never connected.** `gateway/main.py`'s lifespan
+  started/stopped `load_balancer`, `worker_pool`, `autoscaler`, and
+  `health_checker`, but never called `memory_manager.store.connect()` —
+  Phase 6/7's entire memory subsystem was fully built and tested but
+  unreachable from the running app; `memory_manager.store.pool` was `None`
+  in production. Fixed by adding `await memory_manager.store.connect(...)`
+  to startup (same `MEMORY_DB_*` settings Phase 6 already defined) and
+  `await memory_manager.store.close()` to shutdown. Verified live: killed
+  and restarted the gateway, log shows `[MemoryManager] Connected to
+  Postgres at /var/run/postgresql:5432`, and `\d memories` in `psql`
+  confirms `ensure_schema()` actually ran against the real DB through
+  this connection, not a test fixture. **Note:** this fixes the
+  connection lifecycle only — no route calls `memory_manager` yet, so the
+  retrieve/rank/budget pipeline from Phase 7 is still not wired into live
+  request handling. That's a separate, larger piece of work, not
+  attempted here.
+* **`WorkerPool.stop()` didn't close its Redis connection.** Cancelled
+  both loop tasks but left `self.redis` open — harmless for one
+  long-lived process, but a real leak under repeated restarts. `stop()`
+  is now `async`: cancels both tasks, awaits them to actually finish
+  unwinding (suppressing `CancelledError`), then calls
+  `self.redis.aclose()` and sets `self.redis = None`. `gateway/main.py`
+  updated to `await worker_pool.stop()`. Verified live: sent a real
+  `SIGTERM` (not `kill -9`) to a running gateway and confirmed a clean
+  "Application shutdown complete" with no traceback.
+* 6 new tests added (188 total): `WorkerPool.stop()` actually closes
+  `self.redis` and marks both tasks done/cancelled (the `pool` test
+  fixture also updated to tolerate a test having already closed the
+  connection, rather than double-closing).
