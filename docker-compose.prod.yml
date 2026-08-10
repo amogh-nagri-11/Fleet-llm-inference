@@ -29,8 +29,13 @@ services:
       # Docker is not reachable from inside the container, so disable in-app
       # container scaling; scale workers by editing replicas / compose scale.
       - STANDBY_WORKER_URLS=
+      - MEMORY_DB_HOST=postgres
+      - MEMORY_DB_USER=fleet
+      - MEMORY_DB_PASSWORD=${MEMORY_DB_PASSWORD:?set MEMORY_DB_PASSWORD in .env for prod}
     depends_on:
       redis:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
       worker1:
         condition: service_started
@@ -49,6 +54,23 @@ services:
       - inference-net
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=fleet
+      - POSTGRES_USER=fleet
+      - POSTGRES_PASSWORD=${MEMORY_DB_PASSWORD:?set MEMORY_DB_PASSWORD in .env for prod}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - inference-net
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "fleet"]
       interval: 10s
       timeout: 5s
       retries: 5

@@ -906,3 +906,70 @@ Phase 15's docs held up.
   `./.venv/bin/python scripts/smoke_test.py --model llama3:latest` and
   `./.venv/bin/pytest tests/ -q` commands as literally written in the
   new `README.md`/`CLAUDE.md` — 9/9 and 210/210 respectively.
+
+## Post-redesign fix — Docker path was never actually tested, and it showed
+
+The user asked for help getting Docker Desktop running on Windows to try
+Fleet there. This surfaced real bugs, because **Docker has been
+unavailable in the dev environment this entire redesign was built in** —
+every phase's "not verified live" caveat about Docker specifically was
+honest, but nobody had actually attempted a container build until now.
+
+* **Critical**: `gateway/Dockerfile` only ever `COPY`'d `config`,
+  `router`, `workers`, `gateway` — never `context/`, `memory/`, or
+  `job_queue/`, all three added by this redesign and all three imported
+  directly by `gateway/main.py`/`gateway/routes.py`/`workers/
+  worker_pool.py`. A container built from the unfixed Dockerfile would
+  crash immediately on startup with `ModuleNotFoundError`. Fixed —
+  added the three missing `COPY` lines and updated the stale header
+  comment.
+* `docker-compose.yml`'s dev-mode hot-reload volume mounts had the same
+  gap — `context/`, `memory/`, `job_queue/` weren't bind-mounted, so
+  even after the Dockerfile fix, live-editing those packages wouldn't
+  have hot-reloaded without a full rebuild. Fixed to match the existing
+  `config`/`router`/`workers`/`gateway` mounts.
+* `docker-compose.yml`'s `gateway.depends_on` listed `redis`/`postgres`
+  as plain service names — Compose's default is "wait for the container
+  to *start*," not "wait for it to be *ready*." Since
+  `memory_manager.store.connect()` and the queue's `XGROUP CREATE`
+  attempt real connections at startup, a fast-starting gateway racing a
+  still-initializing Postgres/Redis would crash. Fixed to
+  `condition: service_healthy` (both already had working healthchecks
+  defined, just not referenced) — same pattern `docker-compose.prod.yml`
+  already used correctly for Redis, just not extended to Postgres when
+  memory storage was added.
+* **`docker-compose.prod.yml` never got a `postgres` service or
+  `MEMORY_DB_*` config at all** when memory storage was added (Phase 6)
+  — only the dev compose file did. Fixed: added the service (mirroring
+  dev's), `MEMORY_DB_HOST=postgres`, and `MEMORY_DB_PASSWORD` required
+  via Compose's `${VAR:?err}` syntax (fails fast with a clear message if
+  unset, rather than silently deploying with no real password — dev's
+  hardcoded `fleet_dev_password` is fine for dev, not for the file
+  literally named `prod`).
+* `.env`'s `STANDBY_WORKER_URLS=http://localhost:11435` (correct for
+  host/native dev) would resolve wrong inside the gateway container —
+  `localhost` there means the gateway container itself, not `worker2`.
+  `docker-compose.prod.yml` already overrode this to empty with an
+  explanatory comment; `docker-compose.yml` didn't. Fixed to match.
+* GPU config: asked rather than guessed, since a wrong default either
+  wastes real hardware or breaks `worker1` outright. User has an RTX
+  3050 — kept the existing `nvidia` device reservation on `worker1`,
+  left `worker2` CPU-only (already true), and added a documented
+  pre-flight check (`docker run --rm --gpus all ... nvidia-smi`) plus a
+  one-line fallback instruction, since GPU passthrough through Docker
+  Desktop isn't always correctly configured on the first attempt.
+* **Explicitly not verified live** — no Docker available in this
+  session's environment, same limitation as every prior phase. What was
+  verified: YAML syntax validity for both compose files (scripted
+  check), and that the fixes mirror patterns already proven correct
+  elsewhere in the same files (`docker-compose.prod.yml`'s existing
+  `service_healthy`/`STANDBY_WORKER_URLS=` handling). The actual
+  `docker compose up --build` run needs to happen on the user's machine.
+* Also found and fixed, unrelated to Docker: the reference agent's
+  sandbox (`examples/coding_agent/sandbox_repo/calculator.py`) had been
+  left in its fixed state from a prior live demo run, failing
+  `test_run_tests_fails_on_the_intentional_bug`. Reset via `git
+  checkout` — a reminder that this fixture's self-resetting test
+  fixture (`tests/test_coding_agent_tools.py`) only resets state *within
+  test runs*, not after manually running `examples/coding_agent/
+  agent.py` outside of pytest.

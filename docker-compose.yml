@@ -1,3 +1,17 @@
+# Local dev stack.
+#
+#   docker compose up --build
+#
+# GPU: worker1 reserves an NVIDIA GPU. Before running this for the first
+# time, confirm Docker Desktop's GPU passthrough actually works:
+#
+#   docker run --rm --gpus all nvidia/cuda:12.0.0-base-ubuntu22.04 nvidia-smi
+#
+# If that fails (rather than printing your GPU info), either fix GPU
+# passthrough in Docker Desktop settings, or fall back to CPU-only by
+# deleting worker1's `deploy:` block below — worker2 has no GPU
+# reservation and works either way.
+
 services:
 
   # ── API Gateway ──────────────────────────────────────
@@ -16,15 +30,29 @@ services:
       - MEMORY_DB_HOST=postgres
       - MEMORY_DB_USER=fleet
       - MEMORY_DB_PASSWORD=fleet_dev_password
+      # .env's STANDBY_WORKER_URLS=http://localhost:11435 is for host/native
+      # dev — "localhost" inside this container means the gateway container
+      # itself, not worker2. Both workers are already in WORKER_URLS above,
+      # so there's nothing meaningful to register; explicitly empty this out
+      # rather than let it fail confusingly (same fix already applied in
+      # docker-compose.prod.yml).
+      - STANDBY_WORKER_URLS=
     depends_on:
-      - redis
-      - worker1
-      - worker2
-      - postgres
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      worker1:
+        condition: service_started
+      worker2:
+        condition: service_started
     volumes:
       - ./config:/app/config
       - ./router:/app/router
       - ./workers:/app/workers
+      - ./context:/app/context
+      - ./memory:/app/memory
+      - ./job_queue:/app/job_queue
       - ./gateway:/app/gateway
     networks:
       - inference-net
