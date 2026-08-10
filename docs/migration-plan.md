@@ -540,3 +540,47 @@ works against a real running gateway and a real model.
   actually fails) and against a scripted fix (asserts it actually
   passes) — a fixture restores `calculator.py`'s original content after
   any test that writes to it.
+
+## Phase 12 — agent workload simulator
+
+Per REDESIGN.md §7-8/§72 Phase 12. Every simulated request goes through
+`client/fleet_client.py` — the same real HTTP API a real caller uses
+(§8: "do not create a fake benchmark path that bypasses Fleet"). Not
+REDESIGN.md §37's benchmark/experiment harness (comparing scheduling
+policies, measuring task success) — that's Phase 14. This is the traffic
+generator those experiments would sit on top of.
+
+* `scripts/simulate.py` — four workload profiles exactly per §7:
+  `coding` (bursts of 3-6 small requests, short gaps — an agent
+  interleaving LLM calls with tool calls), `research` (2-3 larger
+  requests, longer gaps — pausing to "search"), `batch` (5-10 small
+  requests, near-zero gaps), `mixed` (each simulated agent randomly gets
+  one profile). Each simulated agent keeps one `agent_id`/`workflow_id`
+  and loops through its workload pattern for the full `--duration`, not
+  just once — matching §42's example CLI (`--duration 300`, sustained
+  load, not a one-shot burst).
+  `--arrival-rate` staggers agent start times instead of launching all of
+  them at once, for a more realistic ramp-up at scale (§42's
+  `--arrival-rate 20` example).
+* **Reports only what's actually measurable, not §42's example fields
+  verbatim**: latency here is full request round-trip, not TTFT (no
+  streaming yet — that's a documented gap, not itemized in any phase
+  1-15 checklist item), and there's no SLO-violation count (§39
+  priorities/SLOs were never implemented — no phase 1-15 checklist item
+  covers them either). The report explicitly says so rather than
+  fabricating those fields to match the doc's example output shape.
+* Verified live: ran `--agents 3 --workload mixed --duration 25` against
+  the real gateway + Ollama. All 3 simulated agents happened to draw
+  `batch` (small sample, `random.choice` over 3 options — not a bug), 5
+  real requests completed with 0 failures; gateway log confirms three
+  distinct `agent_id`/`workflow_id` pairs (`batch-agent-0/1/2`) running
+  concurrently. Throughput (~0.12 req/s) and latency (P50 ~19s) reflect
+  the real architecture accurately — one Ollama worker processes
+  requests serially, so concurrent simulated agents queue up behind it.
+  Real numbers from a real run, not invented (§39/§60's standing rule).
+* 13 new tests added (182 total): `percentile()`/`make_prompt()` bounds,
+  `assign_workloads()` (single-type vs. mixed distribution), and
+  `run_agent()` against a `FakeClient` stub (no network) — verifies
+  consistent `agent_id`/`workflow_id` across a whole agent's run,
+  failure results recorded without raising, and `start_delay` (the
+  `--arrival-rate` mechanism) is actually honored.
