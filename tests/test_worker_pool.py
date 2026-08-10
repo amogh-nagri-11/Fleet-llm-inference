@@ -188,6 +188,64 @@ async def run_briefly(coro_factory, seconds=0.3):
 
 
 @pytest.mark.asyncio
+async def test_two_worker_pools_share_queue_without_duplicate_processing(monkeypatch, pool):
+    """Regression test for a live finding while brutally testing Phase 13:
+    CLAUDE.md documents 'scale gateway replicas to add consumers' as a
+    supported pattern, but it had never actually been tested. Verified
+    live with two real gateway processes sharing one Redis Stream (jobs
+    split 2/2 across replicas, zero duplication); this locks the
+    guarantee in as an automated test — two WorkerPool instances racing
+    for the same stream/group must process each job exactly once, not
+    zero or two times."""
+    pool2 = WorkerPool()
+    pool2.queue_key = pool.queue_key
+    pool2.dead_letter_key = pool.dead_letter_key
+    await pool2.connect()
+
+    call_count = {"n": 0}
+
+    class CountingWorker:
+        stats = type("Stats", (), {"url": "http://fake"})()
+
+        async def generate(self, **kwargs):
+            call_count["n"] += 1
+            return {"response": "ok"}
+
+    monkeypatch.setattr(load_balancer, "pick_worker", lambda **kwargs: CountingWorker())
+    monkeypatch.setattr(load_balancer, "record_success", lambda url: None)
+
+    n = 8
+    for i in range(n):
+        await pool.enqueue(f"multi-req-{i}", {"model": "llama3", "prompt": f"hi {i}"})
+
+    task1 = asyncio.create_task(pool._process_loop())
+    task2 = asyncio.create_task(pool2._process_loop())
+    await asyncio.sleep(0.5)
+    for t in (task1, task2):
+        t.cancel()
+    for t in (task1, task2):
+        try:
+            await t
+        except asyncio.CancelledError:
+            pass
+
+    # The direct proof: each job was picked up by exactly one of the two
+    # pools, never both. If consumer-group exclusivity were broken (e.g.
+    # a different group per pool, or a plain list-based queue), this
+    # would be 2*n instead.
+    assert call_count["n"] == n
+
+    for i in range(n):
+        stored = await pool.redis.get(f"llm:result:multi-req-{i}")
+        assert stored is not None
+
+    pending = await pool.redis.xpending(pool.queue_key, settings.QUEUE_CONSUMER_GROUP)
+    assert pending["pending"] == 0
+
+    await pool2.redis.aclose()
+
+
+@pytest.mark.asyncio
 async def test_stop_cancels_tasks_and_closes_redis(pool):
     """Regression test: stop() used to only cancel tasks and never close
     self.redis, leaking the connection pool on every shutdown."""

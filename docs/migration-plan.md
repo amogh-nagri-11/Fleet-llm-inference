@@ -758,3 +758,56 @@ full metric wishlist — see the "deliberately not included" note below.
   `httpx.AsyncClient`) — token metrics increment on success, don't
   increment on failure, `NoCapacityError` is precisely distinguishable
   from a generic `RuntimeError`.
+
+## Brutal live testing pass — Phase 13
+
+Same discipline as the post-Phase-12 audit: real adversarial testing
+against the running gateway, not just re-running green tests. No new
+bugs found this round, but two things worth recording — one a genuine,
+previously-unverified capability now confirmed, one a real characteristic
+worth understanding before relying on it in production.
+
+* **Concurrent load, exact correctness.** Ran `scripts/simulate.py
+  --agents 4 --workload batch --duration 20` (real concurrent agents,
+  `asyncio.gather`, not sequential) against the live gateway. Captured
+  `/metrics` before and after: `fleet_agent_requests_total{endpoint="/chat",
+  has_agent_id="True"}` +6, `fleet_context_items_recorded_total` +6 —
+  both matching the simulator's own "6 requests, 0 failed" report
+  exactly. No race, no double-count, no drop, under real concurrency.
+* **Pathological input.** Sent a 400,000-character prompt
+  (~100k estimated tokens) — 503 in 4ms, gateway unaffected, and
+  `fleet_context_tokens_bucket{le="+Inf"}` incremented while
+  `le="32768.0"` didn't, confirming correct histogram bucketing at the
+  extreme end.
+* **Confirmed, for the first time, a capability `CLAUDE.md` has
+  documented since before this redesign started but nobody had actually
+  tested: "scale gateway replicas (not uvicorn `--workers`) to add
+  consumers."** Started a second full gateway process on `:8001`,
+  independently, with zero manual coordination — it connected to the
+  same `llm:stream:request_queue`/`fleet-workers` group on its own. Fired
+  4 concurrent `/queued/generate` requests at replica 1; the two
+  replicas' logs show jobs 1 & 4 processed by replica 1, jobs 2 & 3 by
+  replica 2 — real Redis Streams consumer-group load balancing, working
+  correctly, live, across two genuinely separate OS processes. Locked in
+  as `test_two_worker_pools_share_queue_without_duplicate_processing`
+  (201 total): two `WorkerPool` instances race for the same 8-job queue,
+  and the shared call counter proves each job is processed by exactly
+  one of them — not zero, not two.
+* **Real characteristic worth knowing, not a bug**: each replica's
+  `/metrics` only reflects work done in *that* process. Confirmed live —
+  replica 1 (which received all 4 HTTP POSTs) shows
+  `fleet_agent_requests_total{endpoint="/queued/generate"}` = 5, replica
+  2 shows nothing for that metric despite having actually processed 2 of
+  those 4 jobs (its `llm_worker_requests_total`/`fleet_input_tokens_total`
+  *did* increment for the real work it did — the split is specifically
+  between "received the HTTP request" metrics on one replica and
+  "dequeued and processed the job" metrics potentially on a different
+  one). This is standard Prometheus multi-instance behavior — true
+  fleet-wide totals need server-side `sum() by (...)` aggregation across
+  every replica's target — but `observability/prometheus/prometheus.yml`
+  currently only lists two fixed targets (compose service name +
+  `host.docker.internal`), not a scrape config that scales to N replicas.
+  Not fixed here (out of scope for a testing pass), just flagged
+  honestly: anyone actually running multiple replicas needs to extend
+  that scrape config, or the numbers on any single replica's dashboard
+  will undercount real fleet-wide activity.
