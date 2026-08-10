@@ -8,6 +8,7 @@ from workers.worker_pool import worker_pool
 from router.autoscaler import autoscaler
 from context.manager import context_manager
 from context.models import ContextType, estimate_tokens
+from gateway.metrics import AGENT_REQUEST_COUNT, AGENT_WORKFLOW_FAILURES, CONTEXT_TOKENS
 
 router = APIRouter()
 
@@ -59,9 +60,21 @@ def resolve_agent_metadata(req: AgentMetadata, endpoint: str) -> dict:
     if req.parent_request_id is not None:
         meta["parent_request_id"] = req.parent_request_id
 
+    AGENT_REQUEST_COUNT.labels(
+        endpoint=endpoint, has_agent_id=str(req.agent_id is not None)
+    ).inc()
+
     fields = " ".join(f"{k}={v}" for k, v in meta.items())
     print(f"[Fleet] event=received endpoint={endpoint} {fields}")
     return meta
+
+
+def record_workflow_failure(meta: dict, endpoint: str) -> None:
+    """fleet_agent_workflow_failures_total only counts agent-aware
+    requests — a plain caller getting a 503 isn't a workflow failure,
+    there's no workflow to have failed."""
+    if meta.get("workflow_id") is not None:
+        AGENT_WORKFLOW_FAILURES.labels(endpoint=endpoint).inc()
 
 
 # ── Context-aware routing helper (Phase 9) ──────────────────
@@ -85,7 +98,9 @@ def get_prospective_context_tokens(meta: dict, content: str) -> Optional[int]:
     workflow_id = meta.get("workflow_id")
     if workflow_id is None:
         return None
-    return context_manager.total_tokens(workflow_id) + estimate_tokens(content)
+    tokens = context_manager.total_tokens(workflow_id) + estimate_tokens(content)
+    CONTEXT_TOKENS.observe(tokens)
+    return tokens
 
 
 def record_context(meta: dict, content: str) -> None:
@@ -122,6 +137,7 @@ async def generate(req: GenerateRequest, x_api_key: Optional[str] = Header(None)
     try:
         worker = load_balancer.pick_worker(context_tokens=context_tokens)
     except RuntimeError as e:
+        record_workflow_failure(meta, "/generate")
         raise HTTPException(status_code=503, detail=str(e))
 
     record_context(meta, req.prompt)
@@ -132,6 +148,7 @@ async def generate(req: GenerateRequest, x_api_key: Optional[str] = Header(None)
         return {**meta, **result}
     except RuntimeError as e:
         load_balancer.record_failure(worker.stats.url)
+        record_workflow_failure(meta, "/generate")
         raise HTTPException(status_code=503, detail=str(e))
 
 
@@ -147,6 +164,7 @@ async def chat(req: ChatRequest, x_api_key: Optional[str] = Header(None)):
     try:
         worker = load_balancer.pick_worker(context_tokens=context_tokens)
     except RuntimeError as e:
+        record_workflow_failure(meta, "/chat")
         raise HTTPException(status_code=503, detail=str(e))
 
     record_context(meta, chat_content)
@@ -158,6 +176,7 @@ async def chat(req: ChatRequest, x_api_key: Optional[str] = Header(None)):
         return {**meta, **result}
     except RuntimeError as e:
         load_balancer.record_failure(worker.stats.url)
+        record_workflow_failure(meta, "/chat")
         raise HTTPException(status_code=503, detail=str(e))
 
 
@@ -191,7 +210,14 @@ async def queued_generate(req: GenerateRequest, x_api_key: Optional[str] = Heade
 
     result = await worker_pool.get_result(request_id)
     if not result:
+        record_workflow_failure(meta, "/queued/generate")
         raise HTTPException(status_code=504, detail="Request timed out in queue")
+    if "error" in result:
+        # worker_pool.py's own failure path — currently still returns 200
+        # with an error body rather than a non-2xx status (a separate,
+        # pre-existing behavior this metrics-only phase isn't changing),
+        # but it's still a real failure worth counting accurately.
+        record_workflow_failure(meta, "/queued/generate")
 
     return {**meta, **result}
 

@@ -2,6 +2,7 @@ from collections import defaultdict
 from typing import Optional
 
 from context.models import ContextItem, ContextType
+from gateway.metrics import CONTEXT_ITEMS_RECORDED
 
 
 class ContextStore:
@@ -20,6 +21,7 @@ class ContextStore:
         self._items[item.id] = item
         if item.workflow_id:
             self._by_workflow[item.workflow_id].append(item.id)
+        CONTEXT_ITEMS_RECORDED.inc()
         return item
 
     def get(self, item_id: str) -> Optional[ContextItem]:

@@ -120,6 +120,71 @@
       "targets": [
         { "refId": "A", "legendFormat": "{{worker_url}}", "expr": "llm_worker_healthy" }
       ]
+    },
+    {
+      "type": "row",
+      "title": "Agent / Context (Phase 13)",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 32 }
+    },
+    {
+      "type": "stat",
+      "title": "Agent-aware requests / sec",
+      "description": "Requests carrying agent_id, across all endpoints.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 5, "w": 6, "x": 0, "y": 33 },
+      "fieldConfig": { "defaults": { "unit": "reqps", "decimals": 2, "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null } ] } } },
+      "targets": [ { "refId": "A", "expr": "sum(rate(fleet_agent_requests_total{has_agent_id=\"True\"}[1m]))" } ]
+    },
+    {
+      "type": "stat",
+      "title": "Workflow failures / sec",
+      "description": "Agent-aware (workflow_id present) requests that failed.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 5, "w": 6, "x": 6, "y": 33 },
+      "fieldConfig": { "defaults": { "unit": "reqps", "decimals": 3, "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 0.01 } ] } } },
+      "targets": [ { "refId": "A", "expr": "sum(rate(fleet_agent_workflow_failures_total[1m]))" } ]
+    },
+    {
+      "type": "stat",
+      "title": "Context capacity rejections / sec",
+      "description": "Requests rejected because no worker had enough context capacity (REDESIGN.md §24/§41).",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 5, "w": 6, "x": 12, "y": 33 },
+      "fieldConfig": { "defaults": { "unit": "reqps", "decimals": 3, "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 0.01 } ] } } },
+      "targets": [ { "refId": "A", "expr": "sum(rate(fleet_context_capacity_rejections_total[1m]))" } ]
+    },
+    {
+      "type": "stat",
+      "title": "Context items recorded / sec",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 5, "w": 6, "x": 18, "y": 33 },
+      "fieldConfig": { "defaults": { "unit": "ops", "decimals": 2, "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null } ] } } },
+      "targets": [ { "refId": "A", "expr": "sum(rate(fleet_context_items_recorded_total[1m]))" } ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Context tokens per request (percentiles)",
+      "description": "Measured at routing time — only agent-aware requests (workflow_id present) are observed.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 38 },
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10 } } },
+      "targets": [
+        { "refId": "A", "legendFormat": "p50", "expr": "histogram_quantile(0.50, sum(rate(fleet_context_tokens_bucket[5m])) by (le))" },
+        { "refId": "B", "legendFormat": "p95", "expr": "histogram_quantile(0.95, sum(rate(fleet_context_tokens_bucket[5m])) by (le))" },
+        { "refId": "C", "legendFormat": "p99", "expr": "histogram_quantile(0.99, sum(rate(fleet_context_tokens_bucket[5m])) by (le))" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Input/output tokens per sec, by worker",
+      "description": "From Ollama's prompt_eval_count/eval_count — real per-request token counts, not an estimate.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 38 },
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10 } } },
+      "targets": [
+        { "refId": "A", "legendFormat": "{{worker_url}} input", "expr": "sum(rate(fleet_input_tokens_total[1m])) by (worker_url)" },
+        { "refId": "B", "legendFormat": "{{worker_url}} output", "expr": "sum(rate(fleet_output_tokens_total[1m])) by (worker_url)" }
+      ]
     }
   ]
 }

@@ -3,6 +3,16 @@ from typing import List, Optional
 from workers.ollama_client import OllamaClient
 from router.circuit_breaker import CircuitBreaker
 from config import settings
+from gateway.metrics import CONTEXT_CAPACITY_REJECTIONS
+
+
+class NoCapacityError(RuntimeError):
+    """Raised specifically when no healthy worker has enough context
+    capacity — distinct from the generic 'no healthy workers' case, so
+    callers (and metrics) can tell the two failure modes apart precisely
+    instead of string-matching the error message. Still a RuntimeError,
+    so every existing `except RuntimeError` call site keeps working
+    unchanged."""
 
 
 class LoadBalancer:
@@ -28,7 +38,8 @@ class LoadBalancer:
         available = self._available_workers(context_tokens)
         if not available:
             if context_tokens is not None and self._available_workers():
-                raise RuntimeError(
+                CONTEXT_CAPACITY_REJECTIONS.inc()
+                raise NoCapacityError(
                     f"No available workers can handle {context_tokens} tokens of context "
                     f"(max capacity across healthy workers is lower)"
                 )

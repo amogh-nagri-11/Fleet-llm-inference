@@ -669,3 +669,92 @@ than request-handling correctness.
   `self.redis` and marks both tasks done/cancelled (the `pool` test
   fixture also updated to tolerate a test having already closed the
   connection, rather than double-closing).
+
+## Phase 13 — observability
+
+Per REDESIGN.md §47-51/§72 Phase 13: "Add agent/workflow/context
+metrics." Scoped honestly to what's actually live, not REDESIGN.md's
+full metric wishlist — see the "deliberately not included" note below.
+
+* **New metrics use the `fleet_` prefix**; the pre-existing metrics in
+  `gateway/metrics.py` keep their `llm_` prefix rather than being
+  renamed, so the existing Grafana dashboard's queries don't break.
+* **Deliberately not labeled by `agent_id`/`workflow_id`.** Both are
+  arbitrary, unbounded strings (every simulated/real workflow gets a
+  fresh uuid) — an unbounded-cardinality Prometheus label is a
+  well-documented way to take down a metrics backend. Per-agent/
+  per-workflow detail stays available via the structured `[Fleet]
+  event=received ...` logs already emitted since Phase 2; these metrics
+  are fleet-wide aggregates.
+* **Deliberately not added**: `fleet_context_tokens_before/after/saved`,
+  `fleet_context_selection_seconds`, `fleet_context_compression_seconds`,
+  `fleet_memory_retrieval_seconds`, `fleet_memory_hits/misses`. Those map
+  to `context/selection.py`, `context/compression.py`, and
+  `memory/retrieval.py` — none of which any live route calls (confirmed
+  by the brutal live audit two sessions ago). A metric for code nothing
+  invokes is a permanently-zero series that looks like a live signal and
+  isn't one — worse than no metric. Also skipped: TTFT/TPOT (§50) —
+  streaming isn't implemented, there's no token-by-token timing to
+  measure; and `fleet_agent_workflow_cost`/`_duration` — cost tracking is
+  explicitly deferred (§0.2) and no workflow-completion concept exists
+  to measure duration against.
+* What shipped instead, all tied to code that actually runs on every
+  request:
+  - `AGENT_REQUEST_COUNT` (`fleet_agent_requests_total`, labels
+    `endpoint`/`has_agent_id`) — incremented in
+    `resolve_agent_metadata()`, the one place already common to all
+    three routes.
+  - `AGENT_WORKFLOW_FAILURES` (`fleet_agent_workflow_failures_total`,
+    label `endpoint`) — only counted when `workflow_id` was present (a
+    plain caller's 503 isn't a workflow failure, there's no workflow).
+    Also counts `/queued/generate`'s `{"error": ...}` result body, which
+    currently still returns HTTP 200 (a separate, pre-existing issue this
+    metrics-only phase didn't change) — the metric reports the real
+    outcome regardless of what status code the response carries.
+  - `CONTEXT_TOKENS` (`fleet_context_tokens`, histogram) — observed in
+    `get_prospective_context_tokens()`, i.e. exactly the number that
+    already drives routing decisions, not a separate estimate.
+  - `CONTEXT_ITEMS_RECORDED` (`fleet_context_items_recorded_total`) —
+    incremented inside `ContextStore.add()` itself (not at each call
+    site), so it's accurate regardless of caller and can't drift as new
+    callers get added later.
+  - `CONTEXT_CAPACITY_REJECTIONS` (`fleet_context_capacity_rejections_total`)
+    — needed a small but real refactor: `LoadBalancer.pick_worker()`
+    previously raised a bare `RuntimeError` for both "no healthy
+    workers" and "no worker has capacity," distinguishable only by
+    string-matching the message. Added `NoCapacityError(RuntimeError)`
+    so the two failure modes are precisely distinguishable (and existing
+    `except RuntimeError` call sites keep working unchanged, since it's
+    still a `RuntimeError`).
+  - `INPUT_TOKENS_TOTAL`/`OUTPUT_TOKENS_TOTAL` (`fleet_input_tokens_total`/
+    `fleet_output_tokens_total`, label `worker_url`) — Ollama already
+    returns `prompt_eval_count`/`eval_count` on every response
+    (`workers/ollama_client.py` was already extracting them into
+    `prompt_tokens`/`completion_tokens` in the JSON body) — just wasn't
+    exporting them as metrics until now. Real per-request data, not an
+    estimate.
+* Grafana dashboard (`observability/grafana/provisioning/dashboards/
+  llm-engine.json`) — new "Agent / Context" row: agent-aware req/s,
+  workflow failure rate, capacity rejection rate, context items
+  recorded/s (4 stat panels), context-tokens-per-request percentiles and
+  input/output tokens by worker (2 timeseries). Validated as parseable
+  JSON; not opened in an actual Grafana instance (none running in this
+  environment) — same honesty standard as the rest of this phase.
+* **Verified live with real traffic**, not just unit tests: sent a plain
+  request, an agent-aware request, and one deliberately oversized
+  (capacity-rejected) request to a running gateway, then read `/metrics`
+  directly. Every number matched exactly: `fleet_agent_requests_total`
+  split 2 `has_agent_id="False"` / 1 `has_agent_id="True"`;
+  `fleet_agent_workflow_failures_total{endpoint="/generate"}` = 1 (the
+  rejection); `fleet_context_tokens_count` = 2 (only the two
+  `workflow_id`-carrying requests); and — the important one —
+  `fleet_context_items_recorded_total` = **1, not 2**, live proof the
+  Phase-9-fix regression tests are backed by real behavior: the rejected
+  oversized request still isn't recorded, even under real traffic.
+* 12 new tests added (200 total): agent/context/capacity metrics via
+  delta assertions against the real module-level Counter/Histogram
+  singletons (`tests/test_metrics.py`), plus the first-ever direct unit
+  tests of `OllamaClient` (`tests/test_ollama_client.py`, mocked
+  `httpx.AsyncClient`) — token metrics increment on success, don't
+  increment on failure, `NoCapacityError` is precisely distinguishable
+  from a generic `RuntimeError`.

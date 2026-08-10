@@ -7,7 +7,9 @@ from gateway.metrics import (
     WORKER_ACTIVE_REQUESTS,
     WORKER_REQUEST_COUNT,
     WORKER_LATENCY,
-    WORKER_HEALTH
+    WORKER_HEALTH,
+    INPUT_TOKENS_TOTAL,
+    OUTPUT_TOKENS_TOTAL,
 )
 
 # WORKER_ACTIVE_REQUESTS = Gauge(
@@ -102,13 +104,18 @@ class OllamaClient:
                 self.stats.total_latency += latency
                 self.stats.failures = 0  # reset on success
 
+                prompt_tokens = result.get("prompt_eval_count", 0)
+                completion_tokens = result.get("eval_count", 0)
+                INPUT_TOKENS_TOTAL.labels(worker_url=self.base_url).inc(prompt_tokens)
+                OUTPUT_TOKENS_TOTAL.labels(worker_url=self.base_url).inc(completion_tokens)
+
                 return {
                     "response": result.get("message", {}).get("content", ""),
                     "model": result.get("model"),
                     "worker_url": self.base_url,
                     "latency_ms": round(latency * 1000, 2),
-                    "prompt_tokens": result.get("prompt_eval_count", 0),
-                    "completion_tokens": result.get("eval_count", 0),
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
                 }
         except Exception as e:
             self.stats.failures += 1
@@ -144,13 +151,18 @@ class OllamaClient:
                 self.stats.total_latency += latency
                 self.stats.failures = 0
 
+                prompt_tokens = result.get("prompt_eval_count", 0)
+                completion_tokens = result.get("eval_count", 0)
+                INPUT_TOKENS_TOTAL.labels(worker_url=self.base_url).inc(prompt_tokens)
+                OUTPUT_TOKENS_TOTAL.labels(worker_url=self.base_url).inc(completion_tokens)
+
                 return {
                     "message": result.get("message", {}),
                     "model": result.get("model"),
                     "worker_url": self.base_url,
                     "latency_ms": round(latency * 1000, 2),
-                    "prompt_tokens": result.get("prompt_eval_count", 0),
-                    "completion_tokens": result.get("eval_count", 0),
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
                 }
         except Exception as e:
             self.stats.failures += 1
