@@ -811,3 +811,53 @@ worth understanding before relying on it in production.
   honestly: anyone actually running multiple replicas needs to extend
   that scrape config, or the numbers on any single replica's dashboard
   will undercount real fleet-wide activity.
+
+## Phase 14 — benchmarks
+
+Per REDESIGN.md §52-61/§72 Phase 14. Runs only **3 of REDESIGN.md's 6**
+named experiments — see `docs/experiments.md`'s scope note for why: §53
+(full history vs. budgeted), §54 (tool output explosion), and §56
+(memory retrieval) all compare context *strategies applied to what's
+sent to a model*, but nothing in the live gateway applies context
+selection/artifacts/memory to outgoing prompts yet (same gap Phase 13's
+audit already flagged). Faking that comparison would misrepresent the
+system rather than measure it — so those three aren't run. What's
+runnable and genuinely real:
+
+* **Experiment 1** (`benchmarks/experiments/context_budgeting.py`,
+  adapted from §53) — the closest honest equivalent available today:
+  calls `context/selection.py` directly (not through the gateway) against
+  a real task (Phase 11's planted calculator bug) and a real model.
+  "Task success" is an objective keyword check on the model's diagnosis
+  (§61 — not an LLM judge). **Real result**: `hybrid` (400-token budget)
+  used 396 actual tokens vs. `full`'s 629 (39% fewer) and was 34% faster,
+  both correctly diagnosed the bug.
+* **Experiment 5** (`context_aware_routing.py`, §57) — runs the real
+  production `LoadBalancer.pick_worker()` path against synthetic workers
+  matching §41's own example exactly (this environment has one real
+  Ollama instance, §57 needs several with different capacities). All 3
+  scenarios matched §41's expected eligibility exactly, including the
+  busy-but-capable worker staying eligible and the oversized-request
+  rejection.
+* **Experiment 6** (`agent_bursts.py`, §58) — reuses the Phase 12
+  simulator directly against the live gateway. Deliberately small scales
+  (2, 4 agents, not §58's 10-500) — this environment has one CPU-only
+  Ollama worker in WSL; larger scales wouldn't finish in a reasonable
+  time and the throughput ceiling is capacity-bound by that one worker
+  regardless. Zero failures at both scales; P50 latency roughly doubled
+  from 2→4 agents, consistent with real single-worker queueing.
+* `benchmarks/runner.py` — single entrypoint (`--only <name>` to run
+  just one), matching REDESIGN.md §71's `benchmarks/runner.py`.
+* `docs/experiments.md` — hypothesis/setup/variables/metrics/results/
+  limitations/conclusion for each of the 3, per §61's template. Every
+  number is from an actual run captured during this phase, not
+  projected or estimated (§39/§60's standing rule).
+* 9 new tests added (210 total): pure-logic tests for each experiment's
+  non-network helpers (`build_context_pool`/`task_succeeded` for
+  Experiment 1; the full 3-scenario matrix for Experiment 5, since it has
+  no network dependency at all and can be fully exercised in the suite).
+  Experiment 6 has no dedicated tests — it's pure orchestration over
+  already-tested `scripts/simulate.py` functions (`assign_workloads`,
+  `run_agent`, `percentile`), same as Experiment 1/5's own underlying
+  library code (`context/selection.py`, `router/load_balancer.py`) is
+  already covered by their own phases' test suites.
