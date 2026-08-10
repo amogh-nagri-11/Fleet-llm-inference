@@ -861,3 +861,48 @@ runnable and genuinely real:
   `run_agent`, `percentile`), same as Experiment 1/5's own underlying
   library code (`context/selection.py`, `router/load_balancer.py`) is
   already covered by their own phases' test suites.
+
+## Brutal live testing pass — Phases 14 and 15
+
+Same procedure as the Phase 13 pass: real adversarial testing, not just
+re-running the suite. No critical bugs found — Phase 14's numbers and
+Phase 15's docs held up.
+
+* **Static re-audit**: re-ran the exact greps from the Phase 12/13
+  audits (`context_manager`/`memory_manager` live usage,
+  `MAX_TOKENS`/`CONTEXT_BUDGET_DEFAULT`/`CONTEXT_SELECTION_POLICY` dead
+  settings) against current `HEAD`. Every claim in the new
+  `docs/architecture.md`/`docs/context.md`/`docs/memory.md`/`README.md`
+  still matches reality exactly.
+* **Full `benchmarks/runner.py` run** (never tested end-to-end before —
+  only individual experiments had been run): all 3 experiments back to
+  back, mixing the sync `context_aware_routing.run()` with the async
+  `context_budgeting.run()`/`agent_bursts.run()` calls correctly, no
+  crash. Re-ran Experiment 1 for a second time as a side effect —
+  produced a second real, independent 39%-fewer-tokens result (629→396
+  tokens again, both diagnoses correct), reinforcing it wasn't a fluke
+  of the first run.
+* **Adversarial misuse**: ran `agent_bursts.py --base-url
+  http://localhost:9999` (nothing listening). Confirmed via a direct
+  `curl` that connection-refused fails in ~30ms, not slow — so the ~40s
+  it took the experiment to finish isn't a hang, it's `run_agent()`
+  correctly retrying for the full configured `--duration` regardless of
+  failure. **Real characteristic found**: with a fully dead target and
+  the `batch` workload profile's near-zero think-time, this produces no
+  backoff — 411 requests hammering a provably-unreachable endpoint in
+  20 seconds. Not fixed (it's a benchmark tool retrying a target it has
+  no way to know is permanently dead, not a production code path;
+  "should a load-testing tool back off when 100% of requests fail" is a
+  legitimate design question, not an obvious bug) — flagged here so it's
+  a documented, deliberate non-fix rather than an unnoticed gap.
+* **Documentation link/reference check**: every `[text](path)` markdown
+  link across `README.md`/`CLAUDE.md`/all of `docs/*.md` resolves to a
+  real file (scripted check, not manual spot-checking). Cross-checked
+  Experiment 1's numbers (629/396/39%/34%/22.7s/34.3s) are identical,
+  digit-for-digit, everywhere they're quoted (`README.md`,
+  `docs/experiments.md`, this file) — no transcription drift between
+  copies.
+* **Documented instructions actually work**: ran the exact
+  `./.venv/bin/python scripts/smoke_test.py --model llama3:latest` and
+  `./.venv/bin/pytest tests/ -q` commands as literally written in the
+  new `README.md`/`CLAUDE.md` — 9/9 and 210/210 respectively.
