@@ -1,3 +1,5 @@
+import uuid
+
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -46,7 +48,7 @@ def test_workers_rejects_missing_api_key():
 # ── /generate, /chat ─────────────────────────────────────────
 
 def test_generate_success(monkeypatch):
-    monkeypatch.setattr(load_balancer, "pick_worker", lambda: FakeWorker())
+    monkeypatch.setattr(load_balancer, "pick_worker", lambda **kwargs: FakeWorker())
     monkeypatch.setattr(load_balancer, "record_success", lambda url: None)
 
     resp = client.post("/api/v1/generate", json={"prompt": "hi"}, headers=HEADERS)
@@ -55,7 +57,7 @@ def test_generate_success(monkeypatch):
 
 
 def test_generate_returns_503_not_500_when_no_workers_available(monkeypatch):
-    def raise_no_workers():
+    def raise_no_workers(**kwargs):
         raise RuntimeError("No available workers — all are unhealthy or circuit open")
 
     monkeypatch.setattr(load_balancer, "pick_worker", raise_no_workers)
@@ -65,7 +67,7 @@ def test_generate_returns_503_not_500_when_no_workers_available(monkeypatch):
 
 
 def test_chat_returns_503_not_500_when_no_workers_available(monkeypatch):
-    def raise_no_workers():
+    def raise_no_workers(**kwargs):
         raise RuntimeError("No available workers — all are unhealthy or circuit open")
 
     monkeypatch.setattr(load_balancer, "pick_worker", raise_no_workers)
@@ -85,7 +87,7 @@ def test_generate_worker_failure_records_failure_and_returns_503(monkeypatch):
         async def generate(self, model, prompt):
             raise RuntimeError("Worker http://fake failed: boom")
 
-    monkeypatch.setattr(load_balancer, "pick_worker", lambda: FailingWorker())
+    monkeypatch.setattr(load_balancer, "pick_worker", lambda **kwargs: FailingWorker())
     monkeypatch.setattr(load_balancer, "record_failure", lambda url: calls.append(url))
 
     resp = client.post("/api/v1/generate", json={"prompt": "hi"}, headers=HEADERS)
@@ -94,7 +96,7 @@ def test_generate_worker_failure_records_failure_and_returns_503(monkeypatch):
 
 
 def test_chat_success(monkeypatch):
-    monkeypatch.setattr(load_balancer, "pick_worker", lambda: FakeWorker())
+    monkeypatch.setattr(load_balancer, "pick_worker", lambda **kwargs: FakeWorker())
     monkeypatch.setattr(load_balancer, "record_success", lambda url: None)
 
     resp = client.post(
@@ -184,7 +186,7 @@ def test_queued_generate_times_out(monkeypatch):
 # ── Agent/workflow metadata (Phase 2) ─────────────────────────
 
 def test_generate_without_metadata_gets_auto_request_id(monkeypatch):
-    monkeypatch.setattr(load_balancer, "pick_worker", lambda: FakeWorker())
+    monkeypatch.setattr(load_balancer, "pick_worker", lambda **kwargs: FakeWorker())
     monkeypatch.setattr(load_balancer, "record_success", lambda url: None)
 
     resp = client.post("/api/v1/generate", json={"prompt": "hi"}, headers=HEADERS)
@@ -194,7 +196,7 @@ def test_generate_without_metadata_gets_auto_request_id(monkeypatch):
 
 
 def test_generate_echoes_supplied_agent_metadata(monkeypatch):
-    monkeypatch.setattr(load_balancer, "pick_worker", lambda: FakeWorker())
+    monkeypatch.setattr(load_balancer, "pick_worker", lambda **kwargs: FakeWorker())
     monkeypatch.setattr(load_balancer, "record_success", lambda url: None)
 
     resp = client.post(
@@ -216,7 +218,7 @@ def test_generate_echoes_supplied_agent_metadata(monkeypatch):
 
 
 def test_chat_echoes_supplied_agent_metadata(monkeypatch):
-    monkeypatch.setattr(load_balancer, "pick_worker", lambda: FakeWorker())
+    monkeypatch.setattr(load_balancer, "pick_worker", lambda **kwargs: FakeWorker())
     monkeypatch.setattr(load_balancer, "record_success", lambda url: None)
 
     resp = client.post(
@@ -231,6 +233,132 @@ def test_chat_echoes_supplied_agent_metadata(monkeypatch):
     body = resp.json()
     assert body["agent_id"] == "research-agent-1"
     assert body["workflow_id"] == "workflow-7"
+
+
+# ── Context-aware routing (Phase 9) ───────────────────────────
+# context_manager is a real module-level singleton (not mocked here — the
+# point is to verify it's actually wired in), so each test uses a unique
+# workflow_id to avoid state leaking across tests.
+
+def wf_id() -> str:
+    return f"test-wf-{uuid.uuid4()}"
+
+
+def test_generate_without_workflow_id_passes_no_context_tokens(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        load_balancer, "pick_worker", lambda **kwargs: captured.update(kwargs) or FakeWorker()
+    )
+    monkeypatch.setattr(load_balancer, "record_success", lambda url: None)
+
+    client.post("/api/v1/generate", json={"prompt": "hi"}, headers=HEADERS)
+    assert captured.get("context_tokens") is None
+
+
+def test_generate_with_workflow_id_passes_context_tokens(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        load_balancer, "pick_worker", lambda **kwargs: captured.update(kwargs) or FakeWorker()
+    )
+    monkeypatch.setattr(load_balancer, "record_success", lambda url: None)
+
+    resp = client.post(
+        "/api/v1/generate",
+        json={"prompt": "some fairly long prompt about auth bugs", "workflow_id": wf_id()},
+        headers=HEADERS,
+    )
+    assert resp.status_code == 200
+    assert isinstance(captured.get("context_tokens"), int)
+    assert captured["context_tokens"] > 0
+
+
+def test_generate_context_tokens_grow_across_requests_in_same_workflow(monkeypatch):
+    captured = []
+    monkeypatch.setattr(
+        load_balancer,
+        "pick_worker",
+        lambda **kwargs: captured.append(kwargs.get("context_tokens")) or FakeWorker(),
+    )
+    monkeypatch.setattr(load_balancer, "record_success", lambda url: None)
+
+    workflow_id = wf_id()
+    client.post(
+        "/api/v1/generate", json={"prompt": "x" * 400, "workflow_id": workflow_id}, headers=HEADERS
+    )
+    client.post(
+        "/api/v1/generate", json={"prompt": "y" * 400, "workflow_id": workflow_id}, headers=HEADERS
+    )
+    assert captured[1] > captured[0]
+
+
+def test_chat_with_workflow_id_passes_context_tokens(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        load_balancer, "pick_worker", lambda **kwargs: captured.update(kwargs) or FakeWorker()
+    )
+    monkeypatch.setattr(load_balancer, "record_success", lambda url: None)
+
+    client.post(
+        "/api/v1/chat",
+        json={
+            "messages": [{"role": "user", "content": "hi there, this is a real question"}],
+            "workflow_id": wf_id(),
+        },
+        headers=HEADERS,
+    )
+    assert isinstance(captured.get("context_tokens"), int)
+    assert captured["context_tokens"] > 0
+
+
+def test_generate_no_workers_with_context_tokens_returns_503_not_500(monkeypatch):
+    def raise_no_capacity(**kwargs):
+        raise RuntimeError("No available workers can handle N tokens of context")
+
+    monkeypatch.setattr(load_balancer, "pick_worker", raise_no_capacity)
+
+    resp = client.post(
+        "/api/v1/generate",
+        json={"prompt": "hi", "workflow_id": wf_id()},
+        headers=HEADERS,
+    )
+    assert resp.status_code == 503
+
+
+def test_queued_generate_forwards_context_tokens_when_workflow_id_present(monkeypatch):
+    captured = {}
+
+    async def fake_enqueue(request_id, payload):
+        captured["payload"] = payload
+
+    async def fake_get_result(request_id, timeout=120):
+        return {"response": "ok"}
+
+    monkeypatch.setattr(worker_pool, "enqueue", fake_enqueue)
+    monkeypatch.setattr(worker_pool, "get_result", fake_get_result)
+
+    client.post(
+        "/api/v1/queued/generate",
+        json={"prompt": "hi", "workflow_id": wf_id()},
+        headers=HEADERS,
+    )
+    assert isinstance(captured["payload"]["context_tokens"], int)
+    assert captured["payload"]["context_tokens"] > 0
+
+
+def test_queued_generate_context_tokens_none_without_workflow_id(monkeypatch):
+    captured = {}
+
+    async def fake_enqueue(request_id, payload):
+        captured["payload"] = payload
+
+    async def fake_get_result(request_id, timeout=120):
+        return {"response": "ok"}
+
+    monkeypatch.setattr(worker_pool, "enqueue", fake_enqueue)
+    monkeypatch.setattr(worker_pool, "get_result", fake_get_result)
+
+    client.post("/api/v1/queued/generate", json={"prompt": "hi"}, headers=HEADERS)
+    assert captured["payload"]["context_tokens"] is None
 
 
 def test_queued_generate_uses_supplied_request_id_and_forwards_metadata(monkeypatch):

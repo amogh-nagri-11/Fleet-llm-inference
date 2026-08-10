@@ -356,3 +356,64 @@ itself an inference request through the existing worker layer).
   success/failure paths, the no-worker-available regression guard), and
   `ContextManager.compress_old_context()` integration (store mutation,
   `max_items`, type filtering, empty-workflow no-op).
+
+## Phase 9 — context-aware inference routing
+
+Per REDESIGN.md §72 Phase 9's one line: "Connect the context engine to the
+existing worker scheduler." This is the **first phase that touches
+`gateway/routes.py`'s live request path** — every context/memory phase
+before this (3-8) deliberately stayed unwired. Ollama was fixed and
+verified live earlier this session, so this phase is verified against a
+real running gateway + real model, not just mocks.
+
+* **Scoped narrowly to what §72 actually asks**, not the fuller §24/§40/§41
+  architecture (token-aware/SLO-aware scheduling, a worker capability
+  registry, streaming-aware TTFT routing) — those aren't in any Phase 1-15
+  checklist item. What shipped: workers gained a hard context-capacity
+  limit (`OllamaClient.max_context_tokens`, default 8192 from
+  `WORKER_MAX_CONTEXT_TOKENS`, matching llama3:8b's real context window),
+  and `LoadBalancer.pick_worker(context_tokens=...)` excludes workers that
+  can't hold that much context — per §41's example exactly: a merely-busy
+  worker stays eligible (filtering is on hard capacity, not load); a
+  worker with insufficient capacity doesn't, regardless of `ROUTING_STRATEGY`.
+* **Opt-in, not a behavior change for existing callers.** `gateway/routes.py`
+  only records context and computes `context_tokens` when the caller
+  supplies `workflow_id` (Phase 2's optional metadata). No `workflow_id` →
+  `pick_worker(context_tokens=None)` → identical routing to every phase
+  before this one. Verified with a dedicated test
+  (`test_no_context_tokens_arg_behaves_identically_to_before_phase_9`).
+* `/generate`/`/chat` record the request content into `context_manager`
+  (Phase 3, `type=CONVERSATION`) and use the workflow's running
+  `total_tokens()` as the routing signal — not just this request's size,
+  matching §41's framing of context *accumulating* over a session.
+  `/queued/generate` carries `context_tokens` through the Redis payload the
+  same way Phase 2 carries `agent_id`/`workflow_id` — computed at enqueue
+  time, popped in `worker_pool.py` before `**job` dispatch (same
+  metadata-stripping pattern as before), passed to `pick_worker()`.
+* This is the first time `context/` and the live gateway meet — verified
+  live: two real `/generate` calls in the same `workflow_id` against the
+  actual running gateway + Ollama, confirmed via the `[Fleet] event=received`
+  log that both were recorded, and `scripts/smoke_test.py` passing 9/9
+  against real inference (not mocks) after the change.
+* Existing tests needed a small mechanical update: every test that
+  monkeypatched `load_balancer.pick_worker` with a zero-arg lambda now
+  takes `**kwargs` (the real signature gained an optional
+  `context_tokens` parameter). No behavioral test changes, just signature
+  compatibility.
+* **Deliberately not built yet:** per-worker heterogeneous capacity
+  tracking (every worker uses the same configured limit — this codebase
+  has no worker-capability registry, unlike the superseded draft),
+  token/SLO-aware scoring (§40's other named policies), memory injection
+  into the actual prompt sent to the model (Phase 7's retrieval pipeline
+  exists and is tested, but nothing calls it from `gateway/routes.py`
+  yet — no phase explicitly assigns that wiring; noted as a gap, not a
+  broken promise).
+* 14 new tests added (139 total): load-balancer capacity
+  filtering (exclusion, specific error message, health/circuit
+  interaction, "busy but eligible" per §41), and live-wired route tests
+  using the real `context_manager` singleton (not mocked — the point is
+  proving it's actually connected) with unique per-test workflow ids:
+  context_tokens present only when `workflow_id` is given, growing across
+  requests in the same workflow, `/queued/generate` payload forwarding,
+  and a `worker_pool.py` regression guard that `context_tokens` doesn't
+  leak into `**job`.

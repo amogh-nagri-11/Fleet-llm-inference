@@ -42,7 +42,7 @@ async def test_no_available_worker_writes_error_result_instead_of_hanging(monkey
     job = json.dumps({"request_id": "req-1", "model": "llama3", "prompt": "hi"})
     redis = FakeRedis(jobs=[job])
 
-    def raise_no_workers():
+    def raise_no_workers(**kwargs):
         raise RuntimeError("No available workers — all are unhealthy or circuit open")
 
     monkeypatch.setattr(load_balancer, "pick_worker", raise_no_workers)
@@ -74,7 +74,7 @@ async def test_successful_job_writes_result_and_records_success(monkeypatch):
     job = json.dumps({"request_id": "req-2", "model": "llama3", "prompt": "hi"})
     redis = FakeRedis(jobs=[job])
 
-    monkeypatch.setattr(load_balancer, "pick_worker", lambda: FakeWorker())
+    monkeypatch.setattr(load_balancer, "pick_worker", lambda **kwargs: FakeWorker())
     called = []
     monkeypatch.setattr(load_balancer, "record_success", lambda url: called.append(url))
 
@@ -113,7 +113,7 @@ async def test_agent_metadata_is_stripped_before_dispatch_to_worker(monkeypatch)
     })
     redis = FakeRedis(jobs=[job])
 
-    monkeypatch.setattr(load_balancer, "pick_worker", lambda: StrictWorker())
+    monkeypatch.setattr(load_balancer, "pick_worker", lambda **kwargs: StrictWorker())
     monkeypatch.setattr(load_balancer, "record_success", lambda url: None)
 
     pool = WorkerPool()
@@ -126,3 +126,32 @@ async def test_agent_metadata_is_stripped_before_dispatch_to_worker(monkeypatch)
     # without writing a result at all.
     result = json.loads(redis.stored["llm:result:req-3"])
     assert result == {"response": "ok"}
+
+
+@pytest.mark.asyncio
+async def test_context_tokens_stripped_and_forwarded_to_pick_worker(monkeypatch):
+    """Phase 9: context_tokens rides along in the queue payload (set by
+    gateway/routes.py for agent-aware callers) but isn't an inference
+    kwarg — must be popped before **job, same as agent_id/workflow_id."""
+    job = json.dumps({
+        "request_id": "req-4",
+        "model": "llama3",
+        "prompt": "hi",
+        "context_tokens": 12345,
+    })
+    redis = FakeRedis(jobs=[job])
+
+    captured = {}
+    monkeypatch.setattr(
+        load_balancer, "pick_worker", lambda **kwargs: captured.update(kwargs) or StrictWorker()
+    )
+    monkeypatch.setattr(load_balancer, "record_success", lambda url: None)
+
+    pool = WorkerPool()
+    pool.redis = redis
+
+    await run_one_iteration(pool)
+
+    assert captured["context_tokens"] == 12345
+    result = json.loads(redis.stored["llm:result:req-4"])
+    assert result == {"response": "ok"}  # StrictWorker would've raised if context_tokens leaked in

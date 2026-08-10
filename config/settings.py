@@ -22,10 +22,16 @@ ROUTING_STRATEGY = os.getenv("ROUTING_STRATEGY", "round_robin")
 
 # ── Context budgeting ──────────────────────────────────
 # Default max input tokens the context selector packs a workflow's context
-# down to (REDESIGN.md §9). Not wired into the live request path yet —
-# that's Phase 9.
+# down to (REDESIGN.md §9). Wired into the live request path as of Phase 9.
 CONTEXT_BUDGET_DEFAULT   = int(os.getenv("CONTEXT_BUDGET_DEFAULT", 8192))
 CONTEXT_SELECTION_POLICY = os.getenv("CONTEXT_SELECTION_POLICY", "hybrid")
+
+# Worker context capacity for context-aware routing (REDESIGN.md §24/§41).
+# Uniform across workers for now — this codebase doesn't track per-worker
+# model/capability differences (that's the superseded draft's worker
+# registry concept, not part of this document's scope). 8192 matches
+# llama3:8b's actual context_length.
+WORKER_MAX_CONTEXT_TOKENS = int(os.getenv("WORKER_MAX_CONTEXT_TOKENS", 8192))
 
 # ── Autoscaling ────────────────────────────────────────
 # Standby Ollama URLs the autoscaler registers into the load balancer at

@@ -58,12 +58,13 @@ class WorkerPool:
                     "workflow_id": job.pop("workflow_id", None),
                     "parent_request_id": job.pop("parent_request_id", None),
                 }
+                context_tokens = job.pop("context_tokens", None)
                 print(f"[WorkerPool] event=dequeued request_id={request_id} "
                       f"agent_id={agent_meta['agent_id']} workflow_id={agent_meta['workflow_id']}")
 
                 # Pick a worker and process
                 try:
-                    worker = load_balancer.pick_worker()
+                    worker = load_balancer.pick_worker(context_tokens=context_tokens)
                 except RuntimeError as e:
                     result = {"error": str(e)}
                 else:

@@ -3,9 +3,11 @@ from pydantic import BaseModel
 from typing import Optional, List
 from router.load_balancer import load_balancer
 from config import settings
-import uuid 
-from workers.worker_pool import worker_pool 
+import uuid
+from workers.worker_pool import worker_pool
 from router.autoscaler import autoscaler
+from context.manager import context_manager
+from context.models import ContextType
 
 router = APIRouter()
 
@@ -62,6 +64,22 @@ def resolve_agent_metadata(req: AgentMetadata, endpoint: str) -> dict:
     return meta
 
 
+# ── Context-aware routing helper (Phase 9) ──────────────────
+# REDESIGN.md §24/§41: worker selection should consider how much context a
+# request needs. Only kicks in for agent-aware callers (workflow_id
+# present) — plain callers get identical behavior to every phase before
+# this one (pick_worker() with no context_tokens = no filtering).
+
+def record_context_and_get_tokens(meta: dict, content: str) -> Optional[int]:
+    workflow_id = meta.get("workflow_id")
+    if workflow_id is None:
+        return None
+    context_manager.record(
+        content, ContextType.CONVERSATION, workflow_id=workflow_id, agent_id=meta.get("agent_id")
+    )
+    return context_manager.total_tokens(workflow_id)
+
+
 # ── Routes ────────────────────────────────────────────────
 
 @router.get("/health")
@@ -82,9 +100,10 @@ async def generate(req: GenerateRequest, x_api_key: Optional[str] = Header(None)
 
     meta = resolve_agent_metadata(req, "/generate")
     model = req.model or settings.DEFAULT_MODEL
+    context_tokens = record_context_and_get_tokens(meta, req.prompt)
 
     try:
-        worker = load_balancer.pick_worker()
+        worker = load_balancer.pick_worker(context_tokens=context_tokens)
     except RuntimeError as e:
         raise HTTPException(status_code=503, detail=str(e))
 
@@ -103,9 +122,12 @@ async def chat(req: ChatRequest, x_api_key: Optional[str] = Header(None)):
 
     meta = resolve_agent_metadata(req, "/chat")
     model = req.model or settings.DEFAULT_MODEL
+    context_tokens = record_context_and_get_tokens(
+        meta, "\n".join(m.content for m in req.messages)
+    )
 
     try:
-        worker = load_balancer.pick_worker()
+        worker = load_balancer.pick_worker(context_tokens=context_tokens)
     except RuntimeError as e:
         raise HTTPException(status_code=503, detail=str(e))
 
@@ -132,6 +154,7 @@ async def queued_generate(req: GenerateRequest, x_api_key: Optional[str] = Heade
     meta = resolve_agent_metadata(req, "/queued/generate")
     request_id = meta["request_id"]
     model = req.model or settings.DEFAULT_MODEL
+    context_tokens = record_context_and_get_tokens(meta, req.prompt)
 
     await worker_pool.enqueue(request_id, {
         "model": model,
@@ -139,6 +162,7 @@ async def queued_generate(req: GenerateRequest, x_api_key: Optional[str] = Heade
         "agent_id": req.agent_id,
         "workflow_id": req.workflow_id,
         "parent_request_id": req.parent_request_id,
+        "context_tokens": context_tokens,
     })
 
     result = await worker_pool.get_result(request_id)

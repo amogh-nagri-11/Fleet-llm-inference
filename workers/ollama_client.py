@@ -1,7 +1,8 @@
 import httpx
 import time
 from dataclasses import dataclass, field
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Optional
+from config import settings
 from gateway.metrics import (
     WORKER_ACTIVE_REQUESTS,
     WORKER_REQUEST_COUNT,
@@ -51,9 +52,17 @@ class WorkerStats:
 
 
 class OllamaClient:
-    def __init__(self, base_url: str, timeout: int = 120):
+    def __init__(self, base_url: str, timeout: int = 120, max_context_tokens: Optional[int] = None):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        # Context-aware routing (REDESIGN.md §24/§41) — how many tokens of
+        # context this worker can accept. Defaults from settings rather
+        # than a hardcoded literal so it stays configurable without
+        # touching call sites.
+        self.max_context_tokens = (
+            max_context_tokens if max_context_tokens is not None
+            else settings.WORKER_MAX_CONTEXT_TOKENS
+        )
         self.stats = WorkerStats(url=base_url)
 
     async def health_check(self) -> bool:
