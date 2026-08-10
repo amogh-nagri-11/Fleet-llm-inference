@@ -361,6 +361,104 @@ def test_queued_generate_context_tokens_none_without_workflow_id(monkeypatch):
     assert captured["payload"]["context_tokens"] is None
 
 
+# ── Regression: rejected requests must not pollute context ────
+# Bug found via live chaos testing: recording happened before the
+# capacity check, so a single oversized (rejected) request permanently
+# poisoned its workflow — every future request in that workflow_id kept
+# getting rejected forever, since ContextStore never expires entries.
+
+def test_rejected_oversized_request_does_not_pollute_context(monkeypatch):
+    def pick_worker_with_capacity_limit(context_tokens=None):
+        if context_tokens is not None and context_tokens > 100:
+            raise RuntimeError("No available workers can handle N tokens of context")
+        return FakeWorker()
+
+    monkeypatch.setattr(load_balancer, "pick_worker", pick_worker_with_capacity_limit)
+    monkeypatch.setattr(load_balancer, "record_success", lambda url: None)
+
+    workflow_id = wf_id()
+
+    resp1 = client.post(
+        "/api/v1/generate", json={"prompt": "hi", "workflow_id": workflow_id}, headers=HEADERS
+    )
+    assert resp1.status_code == 200
+
+    resp2 = client.post(
+        "/api/v1/generate",
+        json={"prompt": "x" * 2000, "workflow_id": workflow_id},  # ~500 tokens, over the cap
+        headers=HEADERS,
+    )
+    assert resp2.status_code == 503
+
+    # The critical assertion: a small request in the SAME workflow must
+    # still succeed. Before the fix, this failed forever — the rejected
+    # 2000-char prompt from resp2 had already been recorded.
+    resp3 = client.post(
+        "/api/v1/generate", json={"prompt": "hi again", "workflow_id": workflow_id}, headers=HEADERS
+    )
+    assert resp3.status_code == 200
+
+
+def test_rejected_oversized_chat_does_not_pollute_context(monkeypatch):
+    def pick_worker_with_capacity_limit(context_tokens=None):
+        if context_tokens is not None and context_tokens > 100:
+            raise RuntimeError("No available workers can handle N tokens of context")
+        return FakeWorker()
+
+    monkeypatch.setattr(load_balancer, "pick_worker", pick_worker_with_capacity_limit)
+    monkeypatch.setattr(load_balancer, "record_success", lambda url: None)
+
+    workflow_id = wf_id()
+
+    resp1 = client.post(
+        "/api/v1/chat",
+        json={"messages": [{"role": "user", "content": "hi"}], "workflow_id": workflow_id},
+        headers=HEADERS,
+    )
+    assert resp1.status_code == 200
+
+    resp2 = client.post(
+        "/api/v1/chat",
+        json={"messages": [{"role": "user", "content": "x" * 2000}], "workflow_id": workflow_id},
+        headers=HEADERS,
+    )
+    assert resp2.status_code == 503
+
+    resp3 = client.post(
+        "/api/v1/chat",
+        json={"messages": [{"role": "user", "content": "hi again"}], "workflow_id": workflow_id},
+        headers=HEADERS,
+    )
+    assert resp3.status_code == 200
+
+
+def test_queued_generate_does_not_record_context_before_dispatch(monkeypatch):
+    """/queued/generate must not record anything itself — that's now
+    worker_pool.py's job, only after pick_worker() succeeds there."""
+    from context.manager import context_manager
+
+    captured = {}
+
+    async def fake_enqueue(request_id, payload):
+        captured["payload"] = payload
+
+    async def fake_get_result(request_id, timeout=120):
+        return {"response": "ok"}
+
+    monkeypatch.setattr(worker_pool, "enqueue", fake_enqueue)
+    monkeypatch.setattr(worker_pool, "get_result", fake_get_result)
+
+    workflow_id = wf_id()
+    client.post(
+        "/api/v1/queued/generate",
+        json={"prompt": "x" * 2000, "workflow_id": workflow_id},
+        headers=HEADERS,
+    )
+
+    assert context_manager.total_tokens(workflow_id) == 0
+    assert context_manager.get_candidate_context(workflow_id) == []
+
+
 def test_queued_generate_uses_supplied_request_id_and_forwards_metadata(monkeypatch):
     captured = {}
 

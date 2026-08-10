@@ -5,6 +5,8 @@ from router.load_balancer import load_balancer
 from job_queue.dead_letter import DeadLetterQueue
 from job_queue.retry import RetryPolicy
 from job_queue.streams import RedisStreamQueue
+from context.manager import context_manager
+from context.models import ContextType
 from config import settings
 
 
@@ -88,6 +90,19 @@ class WorkerPool:
         except RuntimeError as e:
             result = {"error": str(e)}
         else:
+            # Record only now that a worker has actually been secured —
+            # same rule as gateway/routes.py's sync paths (see the comment
+            # there for why: a rejected request must never permanently
+            # pollute the workflow's context).
+            workflow_id = agent_meta["workflow_id"]
+            if workflow_id is not None:
+                content = job.get("prompt") or "\n".join(
+                    m["content"] for m in job.get("messages", [])
+                )
+                context_manager.record(
+                    content, ContextType.CONVERSATION,
+                    workflow_id=workflow_id, agent_id=agent_meta["agent_id"],
+                )
             try:
                 if "messages" in job:
                     result = await worker.chat(**job)

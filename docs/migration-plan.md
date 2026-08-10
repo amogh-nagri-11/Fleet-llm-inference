@@ -584,3 +584,53 @@ generator those experiments would sit on top of.
   consistent `agent_id`/`workflow_id` across a whole agent's run,
   failure results recorded without raising, and `start_delay` (the
   `--arrival-rate` mechanism) is actually honored.
+
+## Post-Phase-9 fix — rejected requests were permanently poisoning workflows
+
+Found via adversarial live testing after Phase 12 (not by the unit suite —
+every existing test mocked `pick_worker`, so none of them exercised a real
+capacity rejection followed by a real follow-up request). Confirmed live,
+end-to-end, before writing any fix:
+
+1. `POST /generate` with `workflow_id=X`, a normal prompt → 200 (workflow
+   established).
+2. `POST /generate` with the same `workflow_id=X`, a ~10k-token prompt
+   (over the 8192 worker limit) → correctly 503.
+3. `POST /generate` with the same `workflow_id=X`, `prompt: "hi"` →
+   **503, forever**, every time, until the gateway process restarts.
+
+Root cause: `gateway/routes.py`'s `record_context_and_get_tokens()` called
+`context_manager.record()` **before** `pick_worker()` had confirmed a
+worker could actually take the request. `ContextStore` has no expiry
+(nothing in Phases 3-9 added one), so the oversized rejected content sat
+in the workflow's context forever, permanently pushing `total_tokens()`
+above every worker's capacity. One bad prompt (or one large tool output,
+once Phase 5's artifact path is ever live-wired) could permanently kill
+an agent's entire session — silently, with an error message that reads
+like a transient capacity problem, not "this workflow is now bricked."
+
+Fix: split measuring from recording.
+
+* `get_prospective_context_tokens(meta, content)` — pure read:
+  `context_manager.total_tokens(workflow_id) + estimate_tokens(content)`.
+  No side effect, safe to call before admission is decided.
+* `record_context(meta, content)` — the actual write. Only called by
+  `/generate` and `/chat` **after** `pick_worker()` returns successfully.
+* `/queued/generate` never records at all — enqueuing and dispatch are
+  separated in time (possibly by a lot, since jobs sit in a Redis Stream),
+  so "can a worker handle this" can only be answered for real at actual
+  dispatch time. Recording moved into `workers/worker_pool.py`'s
+  `_process_job()`, in the `else` branch after `pick_worker()` succeeds
+  there — using the job's own `workflow_id`/`agent_id`/prompt content,
+  which was already flowing through the queue payload since Phase 2/9.
+* This also makes the queued path more correct, not just fixed: capacity
+  is now checked against the workflow's state *at actual dispatch time*,
+  not a stale snapshot computed at enqueue time.
+* Verified live: repeated the exact 3-request sequence above against a
+  freshly restarted gateway. Step 3 now returns 200 with a real model
+  response instead of a permanent 503.
+* 5 new regression tests added (187 total): the exact 3-request sequence
+  for both `/generate` and `/chat` (small → oversized-rejected → small
+  must still succeed), `/queued/generate` provably not recording anything
+  itself, and two `WorkerPool._process_job()`-level tests (rejected job
+  records nothing, accepted job records exactly one `CONVERSATION` item).

@@ -113,6 +113,53 @@ async def test_context_tokens_stripped_and_forwarded_to_pick_worker(monkeypatch)
     assert result == {"response": "ok"}  # StrictWorker would've raised if it had leaked into **job
 
 
+# ── Regression: rejected jobs must not pollute context ─────────
+
+@pytest.mark.asyncio
+async def test_rejected_job_does_not_record_context(monkeypatch):
+    from context.manager import context_manager
+
+    def raise_no_capacity(**kwargs):
+        raise RuntimeError("No available workers can handle N tokens of context")
+
+    monkeypatch.setattr(load_balancer, "pick_worker", raise_no_capacity)
+
+    workflow_id = f"test-wf-{uuid.uuid4()}"
+    _, result = await WorkerPool()._process_job({
+        "request_id": "req-5",
+        "model": "llama3",
+        "prompt": "x" * 2000,
+        "workflow_id": workflow_id,
+        "context_tokens": 99999,
+    })
+
+    assert "error" in result
+    assert context_manager.total_tokens(workflow_id) == 0
+    assert context_manager.get_candidate_context(workflow_id) == []
+
+
+@pytest.mark.asyncio
+async def test_accepted_job_does_record_context(monkeypatch):
+    from context.manager import context_manager
+    from context.models import ContextType
+
+    monkeypatch.setattr(load_balancer, "pick_worker", lambda **kwargs: FakeWorker())
+    monkeypatch.setattr(load_balancer, "record_success", lambda url: None)
+
+    workflow_id = f"test-wf-{uuid.uuid4()}"
+    await WorkerPool()._process_job({
+        "request_id": "req-6",
+        "model": "llama3",
+        "prompt": "hi",
+        "workflow_id": workflow_id,
+    })
+
+    items = context_manager.get_candidate_context(workflow_id)
+    assert len(items) == 1
+    assert items[0].type == ContextType.CONVERSATION
+    assert items[0].content == "hi"
+
+
 # ── Full loop, against real Redis Streams (Phase 10) ───────────
 
 @pytest_asyncio.fixture

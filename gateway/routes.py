@@ -7,7 +7,7 @@ import uuid
 from workers.worker_pool import worker_pool
 from router.autoscaler import autoscaler
 from context.manager import context_manager
-from context.models import ContextType
+from context.models import ContextType, estimate_tokens
 
 router = APIRouter()
 
@@ -69,15 +69,32 @@ def resolve_agent_metadata(req: AgentMetadata, endpoint: str) -> dict:
 # request needs. Only kicks in for agent-aware callers (workflow_id
 # present) — plain callers get identical behavior to every phase before
 # this one (pick_worker() with no context_tokens = no filtering).
+#
+# Recording is split from measuring on purpose. A prior version recorded
+# the request into context_manager before checking whether any worker
+# could actually take it — a rejected (oversized) request still
+# permanently added its content to the workflow's context, and since
+# ContextStore never expires anything, that workflow was stuck rejecting
+# every future request forever, with no way to recover short of
+# restarting the gateway. get_prospective_context_tokens() only *measures*
+# what the total would become; record_context() is called by the route
+# only after pick_worker() has actually succeeded, so a rejected request
+# never touches the store.
 
-def record_context_and_get_tokens(meta: dict, content: str) -> Optional[int]:
+def get_prospective_context_tokens(meta: dict, content: str) -> Optional[int]:
     workflow_id = meta.get("workflow_id")
     if workflow_id is None:
         return None
+    return context_manager.total_tokens(workflow_id) + estimate_tokens(content)
+
+
+def record_context(meta: dict, content: str) -> None:
+    workflow_id = meta.get("workflow_id")
+    if workflow_id is None:
+        return
     context_manager.record(
         content, ContextType.CONVERSATION, workflow_id=workflow_id, agent_id=meta.get("agent_id")
     )
-    return context_manager.total_tokens(workflow_id)
 
 
 # ── Routes ────────────────────────────────────────────────
@@ -100,12 +117,14 @@ async def generate(req: GenerateRequest, x_api_key: Optional[str] = Header(None)
 
     meta = resolve_agent_metadata(req, "/generate")
     model = req.model or settings.DEFAULT_MODEL
-    context_tokens = record_context_and_get_tokens(meta, req.prompt)
+    context_tokens = get_prospective_context_tokens(meta, req.prompt)
 
     try:
         worker = load_balancer.pick_worker(context_tokens=context_tokens)
     except RuntimeError as e:
         raise HTTPException(status_code=503, detail=str(e))
+
+    record_context(meta, req.prompt)
 
     try:
         result = await worker.generate(model=model, prompt=req.prompt)
@@ -122,14 +141,15 @@ async def chat(req: ChatRequest, x_api_key: Optional[str] = Header(None)):
 
     meta = resolve_agent_metadata(req, "/chat")
     model = req.model or settings.DEFAULT_MODEL
-    context_tokens = record_context_and_get_tokens(
-        meta, "\n".join(m.content for m in req.messages)
-    )
+    chat_content = "\n".join(m.content for m in req.messages)
+    context_tokens = get_prospective_context_tokens(meta, chat_content)
 
     try:
         worker = load_balancer.pick_worker(context_tokens=context_tokens)
     except RuntimeError as e:
         raise HTTPException(status_code=503, detail=str(e))
+
+    record_context(meta, chat_content)
 
     try:
         messages = [m.model_dump() for m in req.messages]
@@ -154,7 +174,11 @@ async def queued_generate(req: GenerateRequest, x_api_key: Optional[str] = Heade
     meta = resolve_agent_metadata(req, "/queued/generate")
     request_id = meta["request_id"]
     model = req.model or settings.DEFAULT_MODEL
-    context_tokens = record_context_and_get_tokens(meta, req.prompt)
+    # Not recorded here — the queue is processed asynchronously, possibly
+    # much later, so "does a worker have capacity" can only be answered
+    # for real at actual dispatch time. worker_pool.py records only after
+    # pick_worker() succeeds there, same rule as the synchronous routes.
+    context_tokens = get_prospective_context_tokens(meta, req.prompt)
 
     await worker_pool.enqueue(request_id, {
         "model": model,
