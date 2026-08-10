@@ -485,3 +485,58 @@ flagged as a **REPLACE** item since the Phase 1 migration plan.
   directly — pure, no Redis needed — and loop-level behavior (ack, crash
   recovery, dead-lettering) runs against real Redis with unique per-test
   stream keys.
+
+## Phase 11 — reference coding agent
+
+Per REDESIGN.md §28-31/§64/§72 Phase 11. Deliberately simple (§28) — not
+an agent framework, a demonstration that the Fleet loop from §31 actually
+works against a real running gateway and a real model.
+
+* `client/fleet_client.py` — `FleetClient`, the thin reference SDK §64
+  explicitly keeps in scope (only the higher-level `FleetAgent` wrapper,
+  §65, is deferred per §0.2). No retry/backoff/streaming logic — a
+  convenience wrapper over `httpx`, nothing more. Tested with
+  `httpx.MockTransport` (request shape/auth header/error propagation), no
+  live server needed for those 7 tests.
+* `examples/coding_agent/tools.py` — the four hardcoded tools from §28
+  (`read_file`, `write_file`, `search_code`, `run_tests`), **not
+  mocked** — real file I/O and a real `pytest` subprocess run, scoped to
+  a small sandbox directory with explicit path-escape rejection (the
+  agent operates on real files, but never outside its own sandbox).
+  `run_tests()` uses `sys.executable`, not a bare `python3` — otherwise it
+  silently runs against the system interpreter, which doesn't have pytest
+  installed (caught by the test suite, not assumed).
+* `examples/coding_agent/sandbox_repo/` — a tiny toy project with one
+  intentional bug (`add()` returns `a - b`) and a test that catches it,
+  matching §62's "repository with intentional bug" example.
+* `examples/coding_agent/agent.py` — the reference agent. Six-step fixed
+  sequence, not a planner: three steps are **real inference calls through
+  Fleet** (understand the task, analyze the bug, summarize the outcome —
+  all via `FleetClient.chat()` with `agent_id`/`workflow_id` set, so they
+  exercise Phase 9's context-aware routing for real), three are real tool
+  calls (`read_file`, `write_file`, `run_tests`). The code fix itself is
+  scripted (a known string replacement), not parsed from the model's
+  freeform response — explicitly documented in the module docstring as a
+  deliberate scope decision: reliably extracting an exact patch from an
+  8B model's prose is a hard problem unrelated to what this demo is
+  for (Fleet's infrastructure, not code-fixing intelligence).
+* `pytest.ini` — added `testpaths = tests`. Without it, a bare `pytest`
+  run from the repo root would recursively discover
+  `sandbox_repo/test_calculator.py` and run it as if it were part of
+  Fleet's real test suite — it isn't; it's a deliberately-buggy demo
+  fixture.
+* **Verified live, fully**: ran `examples/coding_agent/agent.py` against
+  the real running gateway + real Ollama. The model correctly diagnosed
+  the bug in its own words ("The `add` function is supposed to add two
+  numbers together but instead it subtracts them"), the scripted fix was
+  applied, `run_tests()` went from FAILED to PASSED for real, and the
+  gateway log confirms all three chat calls shared one `workflow_id`
+  under `agent_id=reference-coding-agent` — Phase 9's wiring exercised by
+  a real caller, not just tests. Sandbox reset to its buggy state
+  afterward so the repo stays reproducible for the next run.
+* 15 new tests added (169 total): `FleetClient` request-shape/auth/error
+  tests via `httpx.MockTransport`, and `tools.py` tests including running
+  real pytest against the intentionally-buggy sandbox (asserts it
+  actually fails) and against a scripted fix (asserts it actually
+  passes) — a fixture restores `calculator.py`'s original content after
+  any test that writes to it.
