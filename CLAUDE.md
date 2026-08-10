@@ -17,7 +17,7 @@ and `docs/deployment.md` for deploy paths.
 - `router/` — `load_balancer.py` (strategies + runtime add/remove worker),
   `circuit_breaker.py`, `health_checker.py` (15s loop), `autoscaler.py`.
 - `workers/` — `ollama_client.py` (wraps Ollama `/api/chat`, tracks stats),
-  `worker_pool.py` (Redis BLPOP consumer loop).
+  `worker_pool.py` (Redis Streams consumer + recovery loop, via `job_queue/`).
 - `config/settings.py` — all config via `os.getenv` (no pydantic-settings).
 - `observability/` — Prometheus config + auto-provisioned Grafana dashboard.
 - `k8s/` — manifests + KEDA ScaledObjects.
@@ -28,7 +28,9 @@ and `docs/deployment.md` for deploy paths.
   document them in `.env.example`.
 - All Prometheus metrics live in `gateway/metrics.py` — import from there, don't
   redefine `Counter`/`Gauge`/`Histogram` elsewhere (label sets must stay unique).
-- Redis queue key is `llm:request_queue`; result keys are `llm:result:<id>`.
+- Redis queue is a Stream at `llm:stream:request_queue` (consumer group
+  `fleet-workers`, see `job_queue/`), not the pre-Phase-10 List at
+  `llm:request_queue`; result keys are still `llm:result:<id>`.
 - Routes live under the `/api/v1` prefix; `POST` routes require the `x-api-key`
   header (`config.settings.API_KEY`).
 

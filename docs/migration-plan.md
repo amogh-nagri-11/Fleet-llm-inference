@@ -417,3 +417,71 @@ real running gateway + real model, not just mocks.
   requests in the same workflow, `/queued/generate` payload forwarding,
   and a `worker_pool.py` regression guard that `context_tokens` doesn't
   leak into `**job`.
+
+## Phase 10 — reliable queue (Redis Streams)
+
+Per REDESIGN.md §43/§72 Phase 10: "Upgrade the existing queue to Redis
+Streams with: ACK, retry, recovery, dead-letter queue." Replaces the
+`RPUSH`/`BLPOP` queue `workers/worker_pool.py` used through Phase 9 —
+flagged as a **REPLACE** item since the Phase 1 migration plan.
+
+* **New package named `job_queue/`, not the REDESIGN.md §71 literal
+  `queue/`.** Checked first: `queue` is a Python stdlib module
+  (thread-safe queues, used internally by uvicorn/starlette/anyio), and
+  since the repo root has to stay on `sys.path` for `gateway.main` etc. to
+  import, a top-level `queue/` package would shadow it for every
+  dependency doing `import queue` — confirmed the collision
+  (`import queue; queue.__file__` resolved to our package) before
+  choosing `job_queue/` instead. Noted here because it's the one place
+  this document's literal file naming can't be followed as written.
+* `job_queue/streams.py` — `RedisStreamQueue`: `XADD`/`XREADGROUP`/`XACK`
+  wrapper, consumer group created idempotently (`XGROUP CREATE` with
+  `BUSYGROUP` treated as success, not an error).
+* `job_queue/retry.py` — `RetryPolicy.recover()`: `XAUTOCLAIM`s pending
+  entries idle past `QUEUE_PENDING_MIN_IDLE_MS`, splits them into
+  retryable vs. dead-lettered using **Redis' own per-entry delivery
+  counter** (`XPENDING`'s `times_delivered`) rather than in-process state
+  — that counter survives process restarts and is shared across every
+  consumer, which an in-memory dict on a single `WorkerPool` instance
+  wouldn't be.
+* `job_queue/dead_letter.py` — `DeadLetterQueue`: a separate stream, so
+  exhausted jobs stay inspectable (`list_all()`) instead of silently
+  vanishing.
+* `workers/worker_pool.py` rewritten internally but **public interface
+  unchanged** (`enqueue`/`get_result`/`queue_depth`/`connect`/`start`/
+  `stop`) — `gateway/routes.py` needed zero changes. Dispatch logic
+  factored into `_process_job()`, shared by both the normal consume loop
+  and a new `_recovery_loop()` that runs `RetryPolicy.recover()` every
+  `QUEUE_RECOVERY_INTERVAL_SECONDS` and reprocesses whatever comes back
+  retryable.
+* **Idempotency (§18)** comes for free from the existing design, not new
+  machinery: results are already keyed by `request_id`
+  (`llm:result:<id>`), so a reclaimed job being reprocessed just
+  overwrites the same key with an equivalent value. No dedup logic added.
+* **Queue key changed**: `llm:stream:request_queue` (Stream), not the old
+  `llm:request_queue` (List) — a Stream is a different Redis type, so
+  reusing the key would `WRONGTYPE` against any leftover data even before
+  considering that it's semantically a different structure now.
+  `CLAUDE.md`'s documented convention updated to match.
+* **Deliberately not built yet**: event-based result delivery. §44
+  explicitly flags polling as wasteful and suggests pub/sub, but that's
+  not itemized in §72 Phase 10's checklist (ACK/retry/recovery/dead-letter
+  only) — `get_result()` still polls `llm:result:<id>`, unchanged,
+  documented in-code as a known, deliberately deferred gap.
+* Verified live: real Redis Streams state inspected directly after running
+  `scripts/smoke_test.py` against the running gateway — `XINFO GROUPS`
+  shows the `fleet-workers` consumer group with 1 entry processed, `XPENDING`
+  shows 0 pending (fully acked), confirming the whole path end-to-end
+  through a real model call, not just the test suite.
+* 15 new tests added (154 total): `job_queue/` tested against real local
+  Redis (same philosophy as Postgres in Phase 6 — mocking `XAUTOCLAIM`/
+  `XPENDING` faithfully would be more work than using the real thing),
+  including competing consumers not receiving the same message, dead-letter
+  after exceeding retries, and idle-time gating (an actively-processing
+  job isn't reclaimed out from under its consumer). `tests/test_worker_pool.py`
+  rewritten: the old `FakeRedis` mock modeled the List-based queue
+  interface, which no longer exists, so regression guards
+  (no-worker/metadata-stripping/context_tokens) now test `_process_job()`
+  directly — pure, no Redis needed — and loop-level behavior (ack, crash
+  recovery, dead-lettering) runs against real Redis with unique per-test
+  stream keys.

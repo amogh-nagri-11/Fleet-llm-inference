@@ -67,6 +67,12 @@ MEMORY_DB_PASSWORD = os.getenv("MEMORY_DB_PASSWORD", "")
 CIRCUIT_BREAKER_THRESHOLD = int(os.getenv("CIRCUIT_BREAKER_THRESHOLD", 5))
 CIRCUIT_BREAKER_TIMEOUT   = int(os.getenv("CIRCUIT_BREAKER_TIMEOUT", 30))
 
+# ── Reliable queue (Redis Streams, REDESIGN.md §43) ────
+QUEUE_CONSUMER_GROUP           = os.getenv("QUEUE_CONSUMER_GROUP", "fleet-workers")
+QUEUE_MAX_RETRIES              = int(os.getenv("QUEUE_MAX_RETRIES", 3))
+QUEUE_PENDING_MIN_IDLE_MS      = int(os.getenv("QUEUE_PENDING_MIN_IDLE_MS", 30000))
+QUEUE_RECOVERY_INTERVAL_SECONDS = int(os.getenv("QUEUE_RECOVERY_INTERVAL_SECONDS", 15))
+
 # ── Observability ──────────────────────────────────────
 PROMETHEUS_PORT = int(os.getenv("PROMETHEUS_PORT", 9090))
 GRAFANA_PORT    = int(os.getenv("GRAFANA_PORT", 3000))
