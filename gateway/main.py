@@ -6,9 +6,11 @@ from gateway.middleware import metrics_middleware
 from router.load_balancer import load_balancer
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 from contextlib import asynccontextmanager
-from router.health_checker import health_checker 
+from router.health_checker import health_checker
 from workers.worker_pool import worker_pool
 from router.autoscaler import autoscaler
+from memory.manager import memory_manager
+from config import settings
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -19,13 +21,25 @@ async def lifespan(app: FastAPI):
     stats = load_balancer.get_worker_stats()
     healthy = sum(1 for w in stats if w["healthy"])
     print(f"Workers online: {healthy}/{len(stats)}")
-    
+
     #Redis + queue
     await worker_pool.connect()
     worker_pool.start()
 
-    await autoscaler.connect() 
+    await autoscaler.connect()
     autoscaler.start()
+
+    # Memory storage (PostgreSQL, REDESIGN.md §18) — was built and tested
+    # in Phase 6/7 but never actually connected here, so memory_manager
+    # was unreachable from the live app until now.
+    await memory_manager.store.connect(
+        host=settings.MEMORY_DB_HOST,
+        port=settings.MEMORY_DB_PORT,
+        database=settings.MEMORY_DB_NAME,
+        user=settings.MEMORY_DB_USER,
+        password=settings.MEMORY_DB_PASSWORD or None,
+    )
+    print(f"[MemoryManager] Connected to Postgres at {settings.MEMORY_DB_HOST}:{settings.MEMORY_DB_PORT}")
 
     # background health check
     health_checker.start()
@@ -33,8 +47,9 @@ async def lifespan(app: FastAPI):
     yield
 
     health_checker.stop()
-    autoscaler.stop() 
-    worker_pool.stop()
+    autoscaler.stop()
+    await worker_pool.stop()
+    await memory_manager.store.close()
 
     print("Shutting down...")
 

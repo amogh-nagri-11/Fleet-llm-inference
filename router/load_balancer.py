@@ -1,25 +1,48 @@
 import asyncio
-from typing import List
+from typing import List, Optional
 from workers.ollama_client import OllamaClient
 from router.circuit_breaker import CircuitBreaker
 from config import settings
+from gateway.metrics import CONTEXT_CAPACITY_REJECTIONS
+
+
+class NoCapacityError(RuntimeError):
+    """Raised specifically when no healthy worker has enough context
+    capacity — distinct from the generic 'no healthy workers' case, so
+    callers (and metrics) can tell the two failure modes apart precisely
+    instead of string-matching the error message. Still a RuntimeError,
+    so every existing `except RuntimeError` call site keeps working
+    unchanged."""
 
 
 class LoadBalancer:
     def __init__(self, worker_urls: List[str]):
-        self.workers = [OllamaClient(url) for url in worker_urls]
+        self.workers = [OllamaClient(url, timeout=settings.REQUEST_TIMEOUT) for url in worker_urls]
         self.breakers = {url: CircuitBreaker(url) for url in worker_urls}
         self._rr_index = 0
 
-    def _available_workers(self) -> List[OllamaClient]:
-        return [
+    def _available_workers(self, context_tokens: Optional[int] = None) -> List[OllamaClient]:
+        healthy = [
             w for w in self.workers
             if w.stats.is_healthy and not self.breakers[w.stats.url].is_open()
         ]
+        if context_tokens is None:
+            return healthy
+        # Context-aware routing (REDESIGN.md §24/§41) — a worker whose
+        # context capacity can't hold the request is hard-ineligible, not
+        # just deprioritized. Workers that are merely busy stay eligible;
+        # this only filters on hard capacity.
+        return [w for w in healthy if w.max_context_tokens >= context_tokens]
 
-    def pick_worker(self) -> OllamaClient:
-        available = self._available_workers()
+    def pick_worker(self, context_tokens: Optional[int] = None) -> OllamaClient:
+        available = self._available_workers(context_tokens)
         if not available:
+            if context_tokens is not None and self._available_workers():
+                CONTEXT_CAPACITY_REJECTIONS.inc()
+                raise NoCapacityError(
+                    f"No available workers can handle {context_tokens} tokens of context "
+                    f"(max capacity across healthy workers is lower)"
+                )
             raise RuntimeError("No available workers — all are unhealthy or circuit open")
 
         strategy = settings.ROUTING_STRATEGY
@@ -45,7 +68,7 @@ class LoadBalancer:
         Idempotent — returns False if the worker is already registered."""
         if self.has_worker(url):
             return False
-        self.workers.append(OllamaClient(url))
+        self.workers.append(OllamaClient(url, timeout=settings.REQUEST_TIMEOUT))
         self.breakers[url] = CircuitBreaker(url)
         return True
 

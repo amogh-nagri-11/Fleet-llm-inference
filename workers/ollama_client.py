@@ -1,12 +1,15 @@
 import httpx
 import time
 from dataclasses import dataclass, field
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Optional
+from config import settings
 from gateway.metrics import (
     WORKER_ACTIVE_REQUESTS,
     WORKER_REQUEST_COUNT,
     WORKER_LATENCY,
-    WORKER_HEALTH
+    WORKER_HEALTH,
+    INPUT_TOKENS_TOTAL,
+    OUTPUT_TOKENS_TOTAL,
 )
 
 # WORKER_ACTIVE_REQUESTS = Gauge(
@@ -51,9 +54,17 @@ class WorkerStats:
 
 
 class OllamaClient:
-    def __init__(self, base_url: str, timeout: int = 120):
+    def __init__(self, base_url: str, timeout: int = 120, max_context_tokens: Optional[int] = None):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        # Context-aware routing (REDESIGN.md §24/§41) — how many tokens of
+        # context this worker can accept. Defaults from settings rather
+        # than a hardcoded literal so it stays configurable without
+        # touching call sites.
+        self.max_context_tokens = (
+            max_context_tokens if max_context_tokens is not None
+            else settings.WORKER_MAX_CONTEXT_TOKENS
+        )
         self.stats = WorkerStats(url=base_url)
 
     async def health_check(self) -> bool:
@@ -93,13 +104,18 @@ class OllamaClient:
                 self.stats.total_latency += latency
                 self.stats.failures = 0  # reset on success
 
+                prompt_tokens = result.get("prompt_eval_count", 0)
+                completion_tokens = result.get("eval_count", 0)
+                INPUT_TOKENS_TOTAL.labels(worker_url=self.base_url).inc(prompt_tokens)
+                OUTPUT_TOKENS_TOTAL.labels(worker_url=self.base_url).inc(completion_tokens)
+
                 return {
                     "response": result.get("message", {}).get("content", ""),
                     "model": result.get("model"),
                     "worker_url": self.base_url,
                     "latency_ms": round(latency * 1000, 2),
-                    "prompt_tokens": result.get("prompt_eval_count", 0),
-                    "completion_tokens": result.get("eval_count", 0),
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
                 }
         except Exception as e:
             self.stats.failures += 1
@@ -135,13 +151,18 @@ class OllamaClient:
                 self.stats.total_latency += latency
                 self.stats.failures = 0
 
+                prompt_tokens = result.get("prompt_eval_count", 0)
+                completion_tokens = result.get("eval_count", 0)
+                INPUT_TOKENS_TOTAL.labels(worker_url=self.base_url).inc(prompt_tokens)
+                OUTPUT_TOKENS_TOTAL.labels(worker_url=self.base_url).inc(completion_tokens)
+
                 return {
                     "message": result.get("message", {}),
                     "model": result.get("model"),
                     "worker_url": self.base_url,
                     "latency_ms": round(latency * 1000, 2),
-                    "prompt_tokens": result.get("prompt_eval_count", 0),
-                    "completion_tokens": result.get("eval_count", 0),
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
                 }
         except Exception as e:
             self.stats.failures += 1

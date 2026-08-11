@@ -1,6 +1,7 @@
 .env
 __pycache__/
 venv/
+.venv/
 
 # Claude Code local overrides (machine-specific)
 .claude/settings.local.json
@@ -9,3 +10,7 @@ venv/
 *.pyc
 .pytest_cache/
 .ruff_cache/
+
+REDESIGN.md
+fleet-context.txt
+CLAUDE.md
