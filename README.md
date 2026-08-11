@@ -240,7 +240,14 @@ scope decision about what this demo is for, not a limitation of Fleet.
 
 ## Getting started
 
-### Local (host)
+Application code is plain Python (FastAPI/uvicorn/asyncpg/httpx, all with
+proper native Windows wheels) and has no POSIX-only calls — the only
+OS-specific things in this repo are the *infrastructure* dependencies
+(Redis has no official native Windows server) and the `scripts/*.sh`
+convenience scripts (bash). See "Windows" below for the practical
+consequence of that split.
+
+### Local (host) — Linux / macOS / WSL
 
 ```bash
 cp .env.example .env            # then edit values
@@ -276,9 +283,107 @@ docker compose -f docker-compose.prod.yml up -d --build   # single-machine prod
 - Grafana: http://localhost:3000 (admin / admin) — dashboard now includes
   an "Agent / Context" row alongside the original request/worker panels.
 - `docker-compose.yml` now includes a `postgres` service for memory
-  storage (added when memory storage was built — this repo's own
-  Docker-unavailable dev environment couldn't verify it live; the native
-  Postgres path above is what's actually been run).
+  storage, and both compose files correctly `COPY`/bind-mount
+  `context/`, `memory/`, and `job_queue/` (the packages this redesign
+  added) into the gateway image/container.
+- GPU: `worker1` reserves an NVIDIA GPU by default. Confirm passthrough
+  first with `docker run --rm --gpus all nvidia/cuda:12.0.0-base-ubuntu22.04 nvidia-smi`;
+  if that fails, delete `worker1`'s `deploy:` block to fall back to
+  CPU-only (`worker2` already has no GPU reservation).
+
+### Windows
+
+**Native Windows (no WSL, no Docker) is not recommended — Redis is the
+blocker.** Redis Inc. doesn't ship an official native Windows server
+binary; `redis-server` is a Linux/macOS thing. Everything else (Ollama,
+Python, FastAPI, uvicorn, asyncpg) has proper native Windows support, and
+`config/settings.py`'s only OS-flavored default
+(`MEMORY_DB_HOST`, which also accepts a plain TCP hostname) is just a
+config value, not a hard dependency — but without a working Redis you
+can't bring the gateway up at all, since the queue connects at startup.
+
+**Use Docker Compose instead — it's the recommended path on native
+Windows** (PowerShell, Docker Desktop with the WSL2 backend):
+
+```powershell
+Copy-Item .env.example .env     # then edit values
+docker compose up --build
+```
+
+Docker Desktop runs Linux containers regardless of the Windows host, so
+Redis/Postgres/Ollama all come up exactly as they do on Linux — nothing
+in the compose files is Windows-specific because nothing needs to be.
+Same GPU preflight command as above works from PowerShell unchanged.
+**Honesty check**: the Dockerfile/compose-file bugs (missing `COPY`s,
+missing `depends_on: condition: service_healthy`, missing prod Postgres
+service) were found and fixed by code review, not by an actual container
+build — Docker has not been available in any environment this project
+was developed in until now. The smoke test below is what actually proves
+the fix works, on your machine, for real.
+
+The three paths, concretely:
+
+| Path | Works on native Windows? | Notes |
+|---|---|---|
+| `docker compose up --build` | Should — fixed, not yet run live | Recommended. Needs Docker Desktop + WSL2 backend. |
+| Native host processes (`### Local (host)` above) | No, blocked on Redis | Would need a Redis substitute (e.g. Memurai) — untested here. |
+| WSL2 (Ubuntu) + the Linux host path | Yes, actually run end-to-end | What this project was developed and verified against; not "native" Windows but no Docker required. |
+
+See "Test case: smoke test on Windows" below to validate the Docker
+Compose stack end-to-end once it's up — that run is what turns "should
+work" into "does work."
+
+#### Test case: smoke test on Windows
+
+Validates the whole stack — gateway, Redis Streams queue, Ollama worker,
+Postgres — from a native Windows shell, using the same
+`scripts/smoke_test.py` the Linux/WSL path uses.
+
+```powershell
+# 1. Bring the stack up (first build pulls several images — can take a while)
+docker compose up --build -d
+docker compose ps                      # all services should show "healthy" or "running"
+
+# 2. Set DEFAULT_MODEL in .env to a real model tag, THEN pull that same
+#    model into BOTH worker containers — not just one. Fleet load-balances
+#    across every worker in WORKER_URLS; a worker that's missing the model
+#    doesn't fail closed, it 404s per-request. The circuit breaker opens
+#    after a few of those, but retries it (HALF_OPEN) every
+#    CIRCUIT_BREAKER_TIMEOUT seconds, so a mismatched worker causes
+#    intermittent, not permanent, 503s on /generate and /chat — confusing
+#    to debug if you don't know both workers need the pull.
+docker compose exec worker1 ollama pull llama3.1:8b
+docker compose exec worker2 ollama pull llama3.1:8b
+
+# 3. Run the smoke test from the Windows host (containers publish to localhost)
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install httpx
+python scripts\smoke_test.py --skip-inference          # fast pass: wiring/auth/health
+python scripts\smoke_test.py --model llama3.1:8b       # full pass: real /generate, /chat, /queued/generate calls
+```
+
+Expected fast-pass output (`--skip-inference`):
+
+```
+[PASS] GET /api/v1/health — status=200
+[PASS] POST /api/v1/generate rejects missing api key — status=401
+[PASS] GET /api/v1/workers rejects bad api key — status=401
+[PASS] GET /api/v1/workers — status=200
+[PASS] GET /api/v1/queue/depth — status=200
+[PASS] GET /metrics — status=200
+
+5/5 checks passed
+```
+
+Exit code is `0` on success, `1` otherwise. `--api-key`/`--model` must
+match your `.env`'s `API_KEY`/`DEFAULT_MODEL` — the smoke test's own
+defaults (`dev-key` / `llama3:latest`) are just fallbacks for when you
+haven't overridden them, not a claim that `llama3:latest` is what's
+actually pulled; verify with `docker compose exec worker1 ollama list`
+(and `worker2`) before assuming a 503 is a real bug rather than a missing
+model. Tear down with `docker compose down` (add `-v` to also drop the
+Redis/Postgres/Ollama volumes).
 
 ### Kubernetes + KEDA
 
