@@ -67,14 +67,17 @@ WORKER_HEALTH = Gauge(
 # via the structured `[Fleet] event=received ...` logs instead; these
 # metrics are fleet-wide aggregates.
 #
-# Also deliberately NOT included: fleet_context_tokens_before/after/saved,
-# fleet_context_selection_seconds, fleet_context_compression_seconds,
+# Also deliberately NOT included: fleet_context_selection_seconds,
 # fleet_memory_retrieval_seconds, fleet_memory_hits/misses. Those map to
-# context/selection.py, context/compression.py, and memory/retrieval.py —
-# none of which any live route calls yet (confirmed by a brutal live
-# audit; see docs/migration-plan.md). Adding metrics for code nothing
-# invokes would just be permanently-zero dead series, which is worse than
-# no metric at all — it looks like a live signal and isn't one.
+# context/selection.py and memory/retrieval.py — neither is called by any
+# live route yet (confirmed by a brutal live audit; see
+# docs/migration-plan.md). Adding metrics for code nothing invokes would
+# just be permanently-zero dead series, which is worse than no metric at
+# all — it looks like a live signal and isn't one.
+#
+# context/compression.py *is* now wired in (context_manager
+# .compress_if_over_budget(), triggered from gateway/routes.py after a
+# successful /generate or /chat call), so its metrics belong here instead.
 
 AGENT_REQUEST_COUNT = Counter(
     "fleet_agent_requests_total",
@@ -102,6 +105,16 @@ CONTEXT_ITEMS_RECORDED = Counter(
 CONTEXT_CAPACITY_REJECTIONS = Counter(
     "fleet_context_capacity_rejections_total",
     "Requests rejected because no worker had enough context capacity"
+)
+
+CONTEXT_COMPRESSIONS_TOTAL = Counter(
+    "fleet_context_compressions_total",
+    "Workflow context compressions triggered by compress_if_over_budget"
+)
+
+CONTEXT_TOKENS_SAVED_TOTAL = Counter(
+    "fleet_context_tokens_saved_total",
+    "Tokens removed from workflow context by compression (tokens_before - tokens_after)"
 )
 
 INPUT_TOKENS_TOTAL = Counter(

@@ -5,6 +5,7 @@ from context.compression import CompressionResult, Summarizer, compress_items
 from context.models import ContextItem, ContextType
 from context.selection import SelectionResult, select_context
 from context.store import ContextStore
+from gateway.metrics import CONTEXT_COMPRESSIONS_TOTAL, CONTEXT_TOKENS_SAVED_TOTAL
 
 
 class ContextManager:
@@ -113,6 +114,38 @@ class ContextManager:
             self.store.delete(item.id)
         self.store.add(result.summary_item)
 
+        return result
+
+    async def compress_if_over_budget(
+        self,
+        workflow_id: str,
+        summarizer: Summarizer,
+        threshold_tokens: int,
+        keep_recent: int = 4,
+    ) -> Optional[CompressionResult]:
+        """Auto-trigger for compress_old_context (REDESIGN.md §13): once a
+        workflow's total context exceeds threshold_tokens, summarize its
+        oldest CONVERSATION items — leaving the most recent `keep_recent`
+        turns alone so the exchange that just happened is never what gets
+        compressed. No-op below threshold, or if there aren't at least 2
+        old items to fold into a summary (compressing a single item isn't
+        worth the extra LLM call)."""
+        if self.total_tokens(workflow_id) <= threshold_tokens:
+            return None
+
+        conversation_count = len(
+            self.store.list_for_workflow(workflow_id, type=ContextType.CONVERSATION)
+        )
+        old_count = conversation_count - keep_recent
+        if old_count < 2:
+            return None
+
+        result = await self.compress_old_context(
+            workflow_id, summarizer, max_items=old_count, context_type=ContextType.CONVERSATION
+        )
+        if result is not None:
+            CONTEXT_COMPRESSIONS_TOTAL.inc()
+            CONTEXT_TOKENS_SAVED_TOTAL.inc(result.tokens_saved)
         return result
 
 

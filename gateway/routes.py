@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Header
+from fastapi import APIRouter, HTTPException, Header, BackgroundTasks
 from pydantic import BaseModel
 from typing import Optional, List
 from router.load_balancer import load_balancer
@@ -7,6 +7,7 @@ import uuid
 from workers.worker_pool import worker_pool
 from router.autoscaler import autoscaler
 from context.manager import context_manager
+from context.compression import llm_summarizer
 from context.models import ContextType, estimate_tokens
 from gateway.metrics import AGENT_REQUEST_COUNT, AGENT_WORKFLOW_FAILURES, CONTEXT_TOKENS
 
@@ -112,6 +113,35 @@ def record_context(meta: dict, content: str) -> None:
     )
 
 
+# ── Context compression trigger (REDESIGN.md §13) ───────────
+# Runs as a FastAPI background task, scheduled only after a request has
+# already succeeded and its response is on the way back to the caller — an
+# extra LLM summarization call here would otherwise add latency to the very
+# request that pushed the workflow over budget. Same "no workflow_id, no-op"
+# rule as record_context(): plain callers never trigger this.
+
+async def maybe_compress_context(workflow_id: Optional[str]) -> None:
+    if workflow_id is None:
+        return
+    try:
+        result = await context_manager.compress_if_over_budget(
+            workflow_id,
+            llm_summarizer,
+            threshold_tokens=settings.CONTEXT_COMPRESSION_THRESHOLD,
+            keep_recent=settings.CONTEXT_COMPRESSION_KEEP_RECENT,
+        )
+        if result is not None:
+            print(
+                f"[Compression] workflow={workflow_id} items={len(result.original_items)} "
+                f"tokens_before={result.tokens_before} tokens_after={result.tokens_after} "
+                f"saved={result.tokens_saved}"
+            )
+    except RuntimeError as e:
+        # No worker available to run the summarization request — the
+        # workflow just stays over budget until a later request retries.
+        print(f"[Compression] workflow={workflow_id} skipped: {e}")
+
+
 # ── Routes ────────────────────────────────────────────────
 
 @router.get("/health")
@@ -127,7 +157,9 @@ async def health():
 
 
 @router.post("/generate")
-async def generate(req: GenerateRequest, x_api_key: Optional[str] = Header(None)):
+async def generate(
+    req: GenerateRequest, background_tasks: BackgroundTasks, x_api_key: Optional[str] = Header(None)
+):
     verify_api_key(x_api_key)
 
     meta = resolve_agent_metadata(req, "/generate")
@@ -145,6 +177,7 @@ async def generate(req: GenerateRequest, x_api_key: Optional[str] = Header(None)
     try:
         result = await worker.generate(model=model, prompt=req.prompt)
         load_balancer.record_success(worker.stats.url)
+        background_tasks.add_task(maybe_compress_context, meta.get("workflow_id"))
         return {**meta, **result}
     except RuntimeError as e:
         load_balancer.record_failure(worker.stats.url)
@@ -153,7 +186,9 @@ async def generate(req: GenerateRequest, x_api_key: Optional[str] = Header(None)
 
 
 @router.post("/chat")
-async def chat(req: ChatRequest, x_api_key: Optional[str] = Header(None)):
+async def chat(
+    req: ChatRequest, background_tasks: BackgroundTasks, x_api_key: Optional[str] = Header(None)
+):
     verify_api_key(x_api_key)
 
     meta = resolve_agent_metadata(req, "/chat")
@@ -173,6 +208,7 @@ async def chat(req: ChatRequest, x_api_key: Optional[str] = Header(None)):
         messages = [m.model_dump() for m in req.messages]
         result = await worker.chat(model=model, messages=messages)
         load_balancer.record_success(worker.stats.url)
+        background_tasks.add_task(maybe_compress_context, meta.get("workflow_id"))
         return {**meta, **result}
     except RuntimeError as e:
         load_balancer.record_failure(worker.stats.url)

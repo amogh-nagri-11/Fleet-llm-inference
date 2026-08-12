@@ -33,7 +33,7 @@ async def compress_items(
     workflow_id: Optional[str] = None,
     agent_id: Optional[str] = None,
 ) -> CompressionResult:
-    """REDESIGN.md §13: old conversation -> summary -> compressed context.
+    """REDESIGN.md no. 13: old conversation -> summary -> compressed context.
     Must be measurable (§13's own instruction) — CompressionResult tracks
     exactly how many tokens were saved, not a guess."""
     if not items:

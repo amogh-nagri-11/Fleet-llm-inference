@@ -26,6 +26,17 @@ ROUTING_STRATEGY = os.getenv("ROUTING_STRATEGY", "round_robin")
 CONTEXT_BUDGET_DEFAULT   = int(os.getenv("CONTEXT_BUDGET_DEFAULT", 8192))
 CONTEXT_SELECTION_POLICY = os.getenv("CONTEXT_SELECTION_POLICY", "hybrid")
 
+# ── Context compression (REDESIGN.md §13) ──────────────
+# Once a workflow's total recorded context exceeds this many tokens, the
+# oldest CONVERSATION turns get summarized into one SUMMARY item in the
+# background. Defaults to CONTEXT_BUDGET_DEFAULT so compression kicks in
+# right around the same point the selector would otherwise start discarding
+# old turns outright — compression trades them for a summary instead.
+CONTEXT_COMPRESSION_THRESHOLD   = int(os.getenv("CONTEXT_COMPRESSION_THRESHOLD", CONTEXT_BUDGET_DEFAULT))
+# Most-recent conversation turns left untouched even when over budget, so a
+# compression pass never eats the exchange that just happened.
+CONTEXT_COMPRESSION_KEEP_RECENT = int(os.getenv("CONTEXT_COMPRESSION_KEEP_RECENT", 4))
+
 # Worker context capacity for context-aware routing (REDESIGN.md §24/§41).
 # Uniform across workers for now — this codebase doesn't track per-worker
 # model/capability differences (that's the superseded draft's worker
