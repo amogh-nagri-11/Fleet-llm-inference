@@ -10,6 +10,7 @@ from router.health_checker import health_checker
 from workers.worker_pool import worker_pool
 from router.autoscaler import autoscaler
 from memory.manager import memory_manager
+from registry.store import registry_store
 from config import settings
 
 @asynccontextmanager
@@ -28,6 +29,9 @@ async def lifespan(app: FastAPI):
 
     await autoscaler.connect()
     autoscaler.start()
+
+    await registry_store.connect()
+    print(f"[Registry] Connected to Redis at {settings.REDIS_HOST}:{settings.REDIS_PORT}")
 
     # Memory storage (PostgreSQL, REDESIGN.md §18) — was built and tested
     # in Phase 6/7 but never actually connected here, so memory_manager
@@ -49,6 +53,7 @@ async def lifespan(app: FastAPI):
     health_checker.stop()
     autoscaler.stop()
     await worker_pool.stop()
+    await registry_store.close()
     await memory_manager.store.close()
 
     print("Shutting down...")

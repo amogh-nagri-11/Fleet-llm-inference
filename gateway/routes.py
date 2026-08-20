@@ -10,6 +10,8 @@ from context.manager import context_manager
 from context.compression import llm_summarizer
 from context.models import ContextType, estimate_tokens
 from gateway.metrics import AGENT_REQUEST_COUNT, AGENT_WORKFLOW_FAILURES, CONTEXT_TOKENS
+from registry.models import WorkerRecord
+from registry.store import registry_store
 
 router = APIRouter()
 
@@ -37,6 +39,20 @@ class Message(BaseModel):
 class ChatRequest(AgentMetadata):
     messages: List[Message]
     model: Optional[str] = None
+
+class WorkerRegistrationRequest(BaseModel):
+    """Self-reported profile a worker agent sends on startup (and, once
+    heartbeating exists, periodically after). worker_id must be stable
+    across restarts of the same machine — the agent script is responsible
+    for persisting it locally rather than generating a fresh one each run,
+    otherwise every reboot looks like a new machine joining the pool."""
+    worker_id: str
+    url: str
+    name: Optional[str] = None
+    ram_gb: float
+    has_gpu: bool = False
+    vram_gb: Optional[float] = None
+    models: List[str] = []
 
 
 # ── Auth helper ───────────────────────────────────────────
@@ -257,8 +273,50 @@ async def queued_generate(req: GenerateRequest, x_api_key: Optional[str] = Heade
 
     return {**meta, **result}
 
-@router.get("/queue/depth") 
-async def queue_depth(x_api_key: Optional[str] = Header(None)): 
-    verify_api_key(x_api_key) 
-    depth = await worker_pool.queue_depth() 
+@router.get("/queue/depth")
+async def queue_depth(x_api_key: Optional[str] = Header(None)):
+    verify_api_key(x_api_key)
+    depth = await worker_pool.queue_depth()
     return {"queue_depth": depth}
+
+
+# ── Dynamic worker registry ─────────────────────────────────
+# Storage only for now — separate from /workers above, which reports
+# router/load_balancer.py's static WORKER_URLS pool. Nothing here feeds
+# routing decisions yet; that's capability-aware routing, a later step.
+
+@router.post("/registry/register")
+async def register_worker(req: WorkerRegistrationRequest, x_api_key: Optional[str] = Header(None)):
+    verify_api_key(x_api_key)
+
+    record = WorkerRecord(
+        worker_id=req.worker_id,
+        url=req.url,
+        name=req.name or req.worker_id,
+        ram_gb=req.ram_gb,
+        has_gpu=req.has_gpu,
+        vram_gb=req.vram_gb,
+        models=req.models,
+    )
+    saved = await registry_store.register(record)
+    print(f"[Registry] event=register worker_id={saved.worker_id} url={saved.url} "
+          f"name={saved.name} ram_gb={saved.ram_gb} has_gpu={saved.has_gpu} "
+          f"vram_gb={saved.vram_gb} models={saved.models}")
+    return saved.to_dict()
+
+
+@router.get("/registry")
+async def list_registered_workers(x_api_key: Optional[str] = Header(None)):
+    verify_api_key(x_api_key)
+    workers = await registry_store.list_workers()
+    return [w.to_dict() for w in workers]
+
+
+@router.delete("/registry/{worker_id}")
+async def deregister_worker(worker_id: str, x_api_key: Optional[str] = Header(None)):
+    verify_api_key(x_api_key)
+    removed = await registry_store.deregister(worker_id)
+    if not removed:
+        raise HTTPException(status_code=404, detail=f"Worker '{worker_id}' is not registered")
+    print(f"[Registry] event=deregister worker_id={worker_id}")
+    return {"deregistered": worker_id}
